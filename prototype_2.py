@@ -12,7 +12,10 @@ app = FastAPI()
 # Allow the frontend’s Render URL (we’ll add this later)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # we'll tighten this later
+    allow_origins=[
+        "http://localhost:5173",                      # local dev
+        "https://speech-to-text-o5lh.onrender.com",        # your frontend Render URL
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
