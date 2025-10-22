@@ -37,10 +37,26 @@ async def upload_audio(file: UploadFile = File(...)):
     completion = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Convert conversations into short chapter-style narratives."},
-            {"role": "user", "content": f"Turn this into a short chapter:\n\n{text}"}
+            {
+                "role": "system",
+                "content": (
+                    "You are an editor who turns long-form spoken transcripts into "
+                    "structured, chaptered summaries. Each chapter should focus on a major topic shift, "
+                    "speaker transition, or narrative milestone. "
+                    "Each chapter must include a clear title and 2–5 short paragraphs summarizing that section. "
+                    "Do not invent new details; only rephrase or clarify what was said."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Divide this transcript into chapters based on topic or scene changes. "
+                    f"Return each chapter with a clear title and narrative flow:\n\n{text}"
+                ),
+            },
         ],
-        max_tokens=2000
+        max_tokens=4000,
     )
+
     os.remove(temp_path)
     return {"chapters": completion.choices[0].message.content}
