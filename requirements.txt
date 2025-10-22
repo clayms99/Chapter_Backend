@@ -3,3 +3,4 @@ uvicorn
 python-dotenv
 openai
 python-multipart
+ffmpeg-python
