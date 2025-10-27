@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
-import os, tempfile, subprocess
+import os, tempfile, subprocess, json
 import imageio_ffmpeg as ffmpeg
 from dotenv import load_dotenv
 
@@ -24,7 +24,6 @@ app.add_middleware(
 
 # --- get ffmpeg binary path ---
 FFMPEG = ffmpeg.get_ffmpeg_exe()
-FFPROBE = ffmpeg.get_ffprobe_exe()
 
 # --- helper: compress audio ---
 def compress_audio(input_path: str) -> str:
@@ -36,19 +35,32 @@ def compress_audio(input_path: str) -> str:
     )
     return output_path
 
+# --- helper: get duration via ffmpeg ---
+def get_duration(file_path: str) -> float:
+    """Return duration (seconds) using ffmpeg -show_entries json."""
+    cmd = [
+        FFMPEG, "-i", file_path,
+        "-f", "null", "-"
+    ]
+    result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    for line in result.stderr.splitlines():
+        if "Duration:" in line:
+            # Example: Duration: 00:02:12.34,
+            parts = line.strip().split("Duration:")[1].split(",")[0].strip()
+            h, m, s = parts.split(":")
+            return float(h) * 3600 + float(m) * 60 + float(s)
+    return 0.0
+
 # --- helper: split large file into ~10 MB chunks ---
 def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
     size = os.path.getsize(file_path)
     if size <= chunk_size_mb * 1024 * 1024:
         return [file_path]
 
-    # Estimate duration
-    dur = float(subprocess.check_output(
-        [FFPROBE, "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", file_path]
-    ).decode().strip())
+    dur = get_duration(file_path)
+    if dur <= 0:
+        return [file_path]
 
-    # Split into equal-duration pieces
     n_parts = int(size // (chunk_size_mb * 1024 * 1024)) + 1
     part_dur = dur / n_parts
     chunk_paths = []
@@ -77,7 +89,8 @@ async def upload_audio(file: UploadFile = File(...)):
     chunks = chunk_audio(compressed_path)
     transcripts = []
 
-    for path in chunks:
+    for idx, path in enumerate(chunks, start=1):
+        print(f"🎧 Processing chunk {idx}/{len(chunks)}: {path}")
         with open(path, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
                 model="whisper-1", file=audio_file
@@ -86,7 +99,6 @@ async def upload_audio(file: UploadFile = File(...)):
         os.remove(path)
 
     full_text = "\n".join(transcripts)
-
     os.remove(temp_path)
     if os.path.exists(compressed_path):
         os.remove(compressed_path)
