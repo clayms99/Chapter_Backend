@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 import os, tempfile, subprocess
+import imageio_ffmpeg as ffmpeg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,29 +22,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- helper: compress audio with ffmpeg ---
+# --- get ffmpeg binary path ---
+FFMPEG = ffmpeg.get_ffmpeg_exe()
+FFPROBE = ffmpeg.get_ffprobe_exe()
+
+# --- helper: compress audio ---
 def compress_audio(input_path: str) -> str:
     """Convert to 64 kbps mono MP3 to reduce size for Whisper."""
     output_path = tempfile.mktemp(suffix=".mp3")
-    subprocess.run([
-        "ffmpeg", "-y", "-i", input_path,
-        "-ac", "1", "-b:a", "64k", output_path
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        [FFMPEG, "-y", "-i", input_path, "-ac", "1", "-b:a", "64k", output_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+    )
     return output_path
 
-# --- helper: split large file into chunks (approx 10 MB each) ---
+# --- helper: split large file into ~10 MB chunks ---
 def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
     size = os.path.getsize(file_path)
     if size <= chunk_size_mb * 1024 * 1024:
         return [file_path]
 
-    # Estimate duration using ffprobe
-    dur = float(subprocess.check_output([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", file_path
-    ]).decode().strip())
+    # Estimate duration
+    dur = float(subprocess.check_output(
+        [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+    ).decode().strip())
 
-    # Split into N equal-duration pieces
+    # Split into equal-duration pieces
     n_parts = int(size // (chunk_size_mb * 1024 * 1024)) + 1
     part_dur = dur / n_parts
     chunk_paths = []
@@ -51,11 +56,12 @@ def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
     for i in range(n_parts):
         part_path = tempfile.mktemp(suffix=f"_part{i}.mp3")
         start_time = i * part_dur
-        subprocess.run([
-            "ffmpeg", "-y", "-i", file_path,
-            "-ss", str(start_time), "-t", str(part_dur),
-            "-acodec", "copy", part_path
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            [FFMPEG, "-y", "-i", file_path,
+             "-ss", str(start_time), "-t", str(part_dur),
+             "-acodec", "copy", part_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+        )
         chunk_paths.append(part_path)
 
     return chunk_paths
@@ -63,28 +69,24 @@ def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
 # --- main upload route ---
 @app.post("/upload/")
 async def upload_audio(file: UploadFile = File(...)):
-    # Save upload
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
         temp_audio.write(await file.read())
         temp_path = temp_audio.name
 
-    # Compress
     compressed_path = compress_audio(temp_path)
-
-    # Chunk if needed
     chunks = chunk_audio(compressed_path)
     transcripts = []
 
     for path in chunks:
         with open(path, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
+                model="whisper-1", file=audio_file
             )
         transcripts.append(transcript.text)
         os.remove(path)
 
     full_text = "\n".join(transcripts)
+
     os.remove(temp_path)
     if os.path.exists(compressed_path):
         os.remove(compressed_path)
@@ -98,9 +100,9 @@ async def upload_audio(file: UploadFile = File(...)):
                 "content": (
                     "You are an editor who turns long-form spoken transcripts into "
                     "structured, chaptered summaries. Each chapter should focus on a major topic shift, "
-                    "speaker transition, or narrative milestone. "
-                    "Each chapter must include a clear title and 2–5 short paragraphs summarizing that section. "
-                    "Do not invent new details; only rephrase or clarify what was said."
+                    "speaker transition, or narrative milestone. Each chapter must include a clear title "
+                    "and 2–5 short paragraphs summarizing that section. Do not invent new details; "
+                    "only rephrase or clarify what was said."
                 ),
             },
             {
@@ -116,6 +118,6 @@ async def upload_audio(file: UploadFile = File(...)):
 
     return {"chapters": completion.choices[0].message.content}
 
-# optional local static serving
+# optional: serve frontend if bundled
 if os.path.exists("static/dist"):
     app.mount("/", StaticFiles(directory="static/dist", html=True), name="static")
