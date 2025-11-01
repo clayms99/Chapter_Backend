@@ -5,6 +5,20 @@ from openai import OpenAI
 import os, tempfile, subprocess, threading, uuid
 import imageio_ffmpeg as ffmpeg
 from dotenv import load_dotenv
+import stripe
+from supabase import create_client, Client
+from fastapi import Request, HTTPException
+from fastapi.responses import JSONResponse
+from jose import jwt, JWTError
+from fastapi import Header
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -67,7 +81,7 @@ def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
 
 
 # --- background job that saves to results ---
-def process_audio(upload_id: str, temp_path: str):
+def process_audio(upload_id: str, temp_path: str, user_id: str):
     try:
         compressed_path = compress_audio(temp_path)
         chunks = chunk_audio(compressed_path)
@@ -106,31 +120,115 @@ def process_audio(upload_id: str, temp_path: str):
             max_tokens=4000,
         )
 
-        results[upload_id] = {
-            "status": "done",
-            "chapters": completion.choices[0].message.content,
-        }
+        chapters_text = completion.choices[0].message.content
+        results[upload_id] = {"status": "done", "chapters": chapters_text}
+
+        # --- 💾 Save to Supabase (user history) ---
+        try:
+            # Confirm user still has active payment
+            user_profile = supabase.table("profiles").select("has_paid").eq("id", user_id).single().execute()
+            has_paid = user_profile.data.get("has_paid") if user_profile.data else False
+
+            if has_paid:
+                supabase.table("user_books").insert({
+                    "user_id": user_id,
+                    "title": f"Session {upload_id[:8]}",
+                    "content": chapters_text,
+                }).execute()
+            else:
+                print(f"User {user_id} attempted to save without payment.")
+        except Exception as db_err:
+            print("Supabase insert failed:", db_err)
 
     except Exception as e:
         results[upload_id] = {"status": "error", "error": str(e)}
 
 
-@app.post("/upload/")
-async def upload_audio(file: UploadFile = File(...)):
-    upload_id = str(uuid.uuid4())
 
+def verify_token(authorization: str) -> str:
+    """Extract and verify Supabase JWT, return user_id"""
+    if not authorization or "Bearer " not in authorization:
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ")[1]
+    try:
+        payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
+        return payload.get("sub")  # user_id
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+@app.post("/upload/")
+async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
+    user_id = verify_token(authorization)
+
+    # Check Supabase if user has paid
+    user = supabase.table("profiles").select("has_paid").eq("id", user_id).single().execute()
+    has_paid = user.data.get("has_paid") if user.data else False
+
+    if not has_paid:
+        raise HTTPException(status_code=403, detail="Payment required")
+
+    upload_id = str(uuid.uuid4())
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
         temp_audio.write(await file.read())
         temp_path = temp_audio.name
 
     results[upload_id] = {"status": "processing"}
-    threading.Thread(target=process_audio, args=(upload_id, temp_path), daemon=True).start()
+    threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id), daemon=True).start()
     return {"id": upload_id, "status": "processing"}
-
 
 @app.get("/result/{upload_id}")
 def get_result(upload_id: str):
     return results.get(upload_id, {"status": "not_found"})
+
+DOMAIN = "https://speech-to-text-o5lh.onrender.com"  # your frontend URL
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(request: Request):
+    data = await request.json()
+    user_id = data.get("user_id")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing user_id")
+
+    session = stripe.checkout.Session.create(
+        payment_method_types=["card"],
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "unit_amount": 500,  # $5.00
+                "product_data": {"name": "Speech-to-Book Access"},
+            },
+            "quantity": 1,
+        }],
+        success_url=f"{DOMAIN}/success",
+        cancel_url=f"{DOMAIN}/cancel",
+        metadata={"user_id": user_id},
+    )
+
+    return {"url": session.url}
+
+@app.post("/webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        user_id = session["metadata"]["user_id"]
+
+        # Mark user as paid in Supabase
+        supabase.table("profiles").update({"has_paid": True}).eq("id", user_id).execute()
+
+    return JSONResponse(status_code=200, content={"status": "success"})
+
 
 
 # optional: serve frontend if bundled
