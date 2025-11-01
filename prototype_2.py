@@ -82,7 +82,7 @@ def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
 
 
 # --- background job that saves to results ---
-def process_audio(upload_id: str, temp_path: str, user_id: str):
+def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
     try:
         compressed_path = compress_audio(temp_path)
         chunks = chunk_audio(compressed_path)
@@ -101,6 +101,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str):
         if os.path.exists(compressed_path):
             os.remove(compressed_path)
 
+        # --- 🧠 GPT-4o processing (your original system prompt preserved)
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -121,28 +122,40 @@ def process_audio(upload_id: str, temp_path: str, user_id: str):
             max_tokens=4000,
         )
 
-        chapters_text = completion.choices[0].message.content
-        results[upload_id] = {"status": "done", "chapters": chapters_text}
+        chapters_text = completion.choices[0].message.content.strip()
 
-        # --- 💾 Save to Supabase (user history) ---
+        # --- ✂️ PREVIEW MODE (if unpaid, show partial output)
+        if not has_paid:
+            preview_lines = chapters_text.splitlines()[:40]  # first ~40 lines
+            preview_text = "\n".join(preview_lines) + "\n\n[...] Unlock full text with payment."
+            results[upload_id] = {
+                "status": "done",
+                "chapters": preview_text,
+                "is_preview": True,
+            }
+            print(f"User {user_id} received preview only.")
+            return
+
+        # --- 💾 Save full content for paying users
+        results[upload_id] = {
+            "status": "done",
+            "chapters": chapters_text,
+            "is_preview": False,
+        }
+
         try:
-            # Confirm user still has active payment
-            user_profile = supabase.table("profiles").select("has_paid").eq("id", user_id).single().execute()
-            has_paid = user_profile.data.get("has_paid") if user_profile.data else False
-
-            if has_paid:
-                supabase.table("user_books").insert({
-                    "user_id": user_id,
-                    "title": f"Session {upload_id[:8]}",
-                    "content": chapters_text,
-                }).execute()
-            else:
-                print(f"User {user_id} attempted to save without payment.")
+            supabase.table("user_books").insert({
+                "user_id": user_id,
+                "title": f"Session {upload_id[:8]}",
+                "content": chapters_text,
+            }).execute()
+            print(f"Saved full book for user {user_id}.")
         except Exception as db_err:
             print("Supabase insert failed:", db_err)
 
     except Exception as e:
         results[upload_id] = {"status": "error", "error": str(e)}
+        print("Error in process_audio:", e)
 
 
 def verify_token(authorization: str = Header(None)):
@@ -167,12 +180,9 @@ def verify_token(authorization: str = Header(None)):
 async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
     user_id = verify_token(authorization)
 
-    # Check Supabase if user has paid
+    # Check payment status
     user = supabase.table("profiles").select("has_paid").eq("id", user_id).single().execute()
     has_paid = user.data.get("has_paid") if user.data else False
-
-    if not has_paid:
-        raise HTTPException(status_code=403, detail="Payment required")
 
     upload_id = str(uuid.uuid4())
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
@@ -180,8 +190,14 @@ async def upload_audio(file: UploadFile = File(...), authorization: str = Header
         temp_path = temp_audio.name
 
     results[upload_id] = {"status": "processing"}
-    threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id), daemon=True).start()
+    threading.Thread(
+        target=process_audio, 
+        args=(upload_id, temp_path, user_id, has_paid),  # 👈 pass payment status
+        daemon=True
+    ).start()
+
     return {"id": upload_id, "status": "processing"}
+
 
 @app.get("/result/{upload_id}")
 def get_result(upload_id: str):
