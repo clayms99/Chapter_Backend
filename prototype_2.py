@@ -145,26 +145,19 @@ def process_audio(upload_id: str, temp_path: str, user_id: str):
         results[upload_id] = {"status": "error", "error": str(e)}
 
 
-
-
 def verify_token(authorization: str = Header(None)):
-    """Verify Supabase JWT and return user_id (sub)"""
-    if not authorization:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid header format")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid auth header")
 
     token = authorization.split(" ")[1]
     try:
         payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
-        return user_id
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        print("✅ TOKEN PAYLOAD:", payload)
+        return payload.get("sub")
+    except Exception as e:
+        print("❌ JWT decode failed:", str(e))
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 
 @app.post("/upload/")
 async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
