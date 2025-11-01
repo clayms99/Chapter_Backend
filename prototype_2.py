@@ -9,8 +9,9 @@ import stripe
 from supabase import create_client, Client
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
-from jose import jwt, JWTError
 from fastapi import Header
+import jwt  # from PyJWT, not jose
+from fastapi import Header, HTTPException, status
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -145,17 +146,25 @@ def process_audio(upload_id: str, temp_path: str, user_id: str):
 
 
 
-def verify_token(authorization: str) -> str:
-    """Extract and verify Supabase JWT, return user_id"""
-    if not authorization or "Bearer " not in authorization:
-        raise HTTPException(status_code=401, detail="Missing token")
+
+def verify_token(authorization: str = Header(None)):
+    """Verify Supabase JWT and return user_id (sub)"""
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid header format")
+
     token = authorization.split(" ")[1]
     try:
         payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
-        return payload.get("sub")  # user_id
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+        return user_id
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 @app.post("/upload/")
 async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
