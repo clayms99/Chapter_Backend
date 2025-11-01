@@ -246,11 +246,10 @@ async def stripe_webhook(request: Request):
         session = event["data"]["object"]
         user_id = session["metadata"]["user_id"]
 
-        # Mark user as paid in Supabase
+        print("✅ Stripe webhook received for user:", user_id)
         supabase.table("profiles").update({"has_paid": True}).eq("id", user_id).execute()
 
     return JSONResponse(status_code=200, content={"status": "success"})
-
 
 
 # optional: serve frontend if bundled
