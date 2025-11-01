@@ -151,13 +151,17 @@ def verify_token(authorization: str = Header(None)):
 
     token = authorization.split(" ")[1]
     try:
-        payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            options={"verify_aud": False}  # 👈 disable audience check
+        )
         print("✅ TOKEN PAYLOAD:", payload)
         return payload.get("sub")
     except Exception as e:
         print("❌ JWT decode failed:", str(e))
         raise HTTPException(status_code=401, detail="Invalid token")
-
 
 @app.post("/upload/")
 async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
