@@ -7,3 +7,4 @@ supabase
 imageio-ffmpeg
 python-jose
 python-multipart
+PyJWT
