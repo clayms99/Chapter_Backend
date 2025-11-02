@@ -16,6 +16,8 @@ from fastapi.responses import StreamingResponse
 import io
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
+from textwrap import wrap
+from reportlab.lib.units import inch
 
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -256,14 +258,10 @@ async def create_checkout_session(request: Request):
 
 @app.get("/download-latest-pdf")
 async def download_latest_pdf(authorization: str = Header(None)):
-    """
-    Return the most recent book for the authenticated user as a downloadable PDF.
-    """
     try:
         user_id = verify_token(authorization)
         print(f"✅ Authenticated PDF download for user: {user_id}")
 
-        # --- Fetch the latest user book from Supabase ---
         res = (
             supabase.table("user_books")
             .select("content")
@@ -272,26 +270,38 @@ async def download_latest_pdf(authorization: str = Header(None)):
             .limit(1)
             .execute()
         )
-
         if not res.data:
             raise HTTPException(status_code=404, detail="No book found for this user.")
 
         book_text = res.data[0]["content"]
 
-        # --- Generate the PDF in memory ---
         buffer = io.BytesIO()
         p = canvas.Canvas(buffer, pagesize=letter)
         width, height = letter
 
-        lines = book_text.split("\n")
-        y = height - 72
-        for line in lines:
-            if y < 72:
-                p.showPage()
-                y = height - 72
-            p.drawString(72, y, line[:110])  # crude wrapping
-            y -= 14
+        # Text object lets you handle multi-line wrapping and spacing
+        textobject = p.beginText()
+        textobject.setTextOrigin(inch, height - inch)
+        textobject.setFont("Helvetica", 12)
+        line_height = 14
+        max_width = width - 2 * inch
 
+        for paragraph in book_text.split("\n"):
+            # wrap each paragraph to fit within the page width (~90 chars)
+            wrapped_lines = wrap(paragraph, 90)
+            for line in wrapped_lines:
+                textobject.textLine(line)
+            textobject.textLine("")  # blank line between paragraphs
+
+            # Handle page overflow
+            if textobject.getY() <= inch:
+                p.drawText(textobject)
+                p.showPage()
+                textobject = p.beginText()
+                textobject.setTextOrigin(inch, height - inch)
+                textobject.setFont("Helvetica", 12)
+
+        p.drawText(textobject)
         p.save()
         buffer.seek(0)
 
