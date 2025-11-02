@@ -270,7 +270,7 @@ async def create_checkout_session(request: Request):
     metadata={
         "user_id": user_id,
         "order_type": purchase_type,  # renamed from purchase_type
-        "title": "Speech-to-Book Order",
+        "title": "Bookify Order",
         },
     )
 
@@ -326,7 +326,7 @@ async def download_latest_pdf(authorization: str = Header(None)):
         p.save()
         buffer.seek(0)
 
-        headers = {"Content-Disposition": "attachment; filename=SpeechToBook.pdf"}
+        headers = {"Content-Disposition": "attachment; filename=Bookify.pdf"}
         return StreamingResponse(buffer, headers=headers, media_type="application/pdf")
 
     except HTTPException as e:
@@ -409,7 +409,7 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
     p.save()
     buffer.seek(0)
 
-    headers = {"Content-Disposition": "attachment; filename=SpeechToBook.pdf"}
+    headers = {"Content-Disposition": "attachment; filename=Bookify.pdf"}
     return StreamingResponse(buffer, headers=headers, media_type="application/pdf")
 
 
@@ -436,7 +436,7 @@ async def stripe_webhook(request: Request):
 
         user_id = meta.get("user_id")
         order_type = meta.get("order_type") or meta.get("purchase_type") or "pdf"
-        title = meta.get("title") or "Speech-to-Book Order"
+        title = meta.get("title") or "Bookify Order"
 
         if not user_id:
             print("⚠️ Missing user_id in metadata, skipping order insert.")
