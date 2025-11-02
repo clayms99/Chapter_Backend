@@ -18,7 +18,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from textwrap import wrap
 from reportlab.lib.units import inch
-
+from fastapi import Depends
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -313,6 +313,27 @@ async def download_latest_pdf(authorization: str = Header(None)):
     except Exception as e:
         print("❌ Error generating PDF:", e)
         raise HTTPException(status_code=500, detail=f"Error generating PDF: {e}")
+
+@app.get("/orders/{user_id}")
+async def get_orders(user_id: str):
+    res = supabase.table("orders").select("*").eq("user_id", user_id).execute()
+    return res.data
+
+@app.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    event = await request.json()
+    # Verify and extract data
+    user_id = event["data"]["object"]["metadata"]["user_id"]
+    order_type = event["data"]["object"]["metadata"]["order_type"]  # pdf / print
+    title = event["data"]["object"]["metadata"]["title"]
+
+    supabase.table("orders").insert({
+        "user_id": user_id,
+        "title": title,
+        "type": order_type,
+        "status": "Processing"
+    }).execute()
+    return {"ok": True}
 
 
 @app.post("/webhook")
