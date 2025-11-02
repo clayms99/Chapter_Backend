@@ -222,10 +222,10 @@ async def create_checkout_session(request: Request):
 
     if purchase_type == "pdf":
         price_id = os.getenv("STRIPE_PRICE_PDF")
-        success_url = "http://localhost:5173/pdf-download"
+        success_url = "https://speech-to-text-o5lh.onrender.com/pdf-download"
     elif purchase_type == "book":
         price_id = os.getenv("STRIPE_PRICE_BOOK")
-        success_url = "http://localhost:5173/book-customize"
+        success_url = "https://speech-to-text-o5lh.onrender.com/book-customize"
     else:
         return JSONResponse({"error": "Invalid type"}, status_code=400)
 
@@ -235,7 +235,7 @@ async def create_checkout_session(request: Request):
         customer_email=None,  # You could populate via Supabase user email if desired
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
-        cancel_url="http://localhost:5173/upload",
+        cancel_url="https://speech-to-text-o5lh.onrender.com/upload",
         metadata={"user_id": user_id, "purchase_type": purchase_type},
     )
     return {"url": session.url}
