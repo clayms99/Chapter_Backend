@@ -246,17 +246,18 @@ async def create_checkout_session(request: Request):
         return JSONResponse({"error": "Invalid type"}, status_code=400)
 
     session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        mode="payment",
-        line_items=[{"price": price_id, "quantity": 1}],
-        success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
-        cancel_url="https://speech-to-text-o5lh.onrender.com/upload",
-        metadata={
-            "user_id": user_id,
-            "order_type": purchase_type,  # 👈 renamed key
-            "title": "Speech-to-Book Order"
+    payment_method_types=["card"],
+    mode="payment",
+    line_items=[{"price": price_id, "quantity": 1}],
+    success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
+    cancel_url="https://speech-to-text-o5lh.onrender.com/upload",
+    metadata={
+        "user_id": user_id,
+        "order_type": purchase_type,  # renamed from purchase_type
+        "title": "Speech-to-Book Order",
         },
     )
+
 
     return {"url": session.url}
 
