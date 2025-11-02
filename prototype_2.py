@@ -353,11 +353,15 @@ async def stripe_webhook(request: Request):
 
         # ✅ Insert order
         try:
+            if order_type == "pdf":
+                status_type = "Complete"
+            else:
+                status_type = "Processing"
             supabase.table("orders").insert({
                 "user_id": user_id,
                 "title": title,
                 "type": order_type,
-                "status": "Processing"
+                "status": status_type
             }).execute()
             print(f"✅ Inserted order for user {user_id} ({order_type})")
         except Exception as e:
