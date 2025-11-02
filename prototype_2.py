@@ -169,20 +169,28 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
                 book_id = book_insert.data[0]["id"]
                 print(f"✅ Saved book {book_id} for user {user_id}")
 
-                # Link the most recent order for this user to the book
-                supabase.table("orders") \
-                    .update({"book_id": book_id}) \
-                    .eq("user_id", user_id) \
-                    .order("created_at", desc=True) \
-                    .limit(1) \
+                # Find most recent order for this user and link it
+                order_res = (
+                    supabase.table("orders")
+                    .select("id")
+                    .eq("user_id", user_id)
+                    .order("created_at", desc=True)
+                    .limit(1)
                     .execute()
+                )
+
+                if order_res.data:
+                    latest_order_id = order_res.data[0]["id"]
+                    supabase.table("orders") \
+                        .update({"book_id": book_id}) \
+                        .eq("id", latest_order_id) \
+                        .execute()
+                    print(f"✅ Linked order {latest_order_id} → book {book_id}")
+                else:
+                    print(f"⚠️ No order found to link for user {user_id}")
 
         except Exception as db_err:
             print("❌ Supabase insert failed:", db_err)
-
-    except Exception as e:
-        results[upload_id] = {"status": "error", "error": str(e)}
-        print("❌ Error in process_audio:", e)
 
 
 
@@ -336,7 +344,7 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
     user_id = verify_token(authorization)
     print(f"✅ Authenticated PDF download for user {user_id}, order {order_id}")
 
-    # Get the book_id linked to this order
+    # Try to get the book_id linked to this order
     order_res = (
         supabase.table("orders")
         .select("book_id")
@@ -346,10 +354,25 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
         .execute()
     )
 
-    if not order_res.data or not order_res.data[0].get("book_id"):
-        raise HTTPException(status_code=404, detail="No book linked to this order.")
+    book_id = None
+    if order_res.data and order_res.data[0].get("book_id"):
+        book_id = order_res.data[0]["book_id"]
+        print(f"✅ Found linked book {book_id} for order {order_id}")
+    else:
+        print("⚠️ No linked book_id — falling back to latest user book")
+        latest = (
+            supabase.table("user_books")
+            .select("id")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if latest.data:
+            book_id = latest.data[0]["id"]
 
-    book_id = order_res.data[0]["book_id"]
+    if not book_id:
+        raise HTTPException(status_code=404, detail="No book available for this order.")
 
     # Fetch the actual book content
     book_res = (
@@ -365,6 +388,33 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
         raise HTTPException(status_code=404, detail="Book not found for this order.")
 
     book_text = book_res.data[0]["content"]
+
+    # Generate PDF
+    buffer = io.BytesIO()
+    p = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+
+    textobject = p.beginText()
+    textobject.setTextOrigin(inch, height - inch)
+    textobject.setFont("Helvetica", 12)
+
+    for paragraph in book_text.split("\n"):
+        for line in wrap(paragraph, 90):
+            textobject.textLine(line)
+        textobject.textLine("")
+        if textobject.getY() <= inch:
+            p.drawText(textobject)
+            p.showPage()
+            textobject = p.beginText()
+            textobject.setTextOrigin(inch, height - inch)
+            textobject.setFont("Helvetica", 12)
+
+    p.drawText(textobject)
+    p.save()
+    buffer.seek(0)
+
+    headers = {"Content-Disposition": "attachment; filename=SpeechToBook.pdf"}
+    return StreamingResponse(buffer, headers=headers, media_type="application/pdf")
 
 
 @app.get("/orders/{user_id}")
