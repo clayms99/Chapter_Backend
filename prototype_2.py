@@ -19,6 +19,7 @@ from reportlab.lib.pagesizes import letter
 from textwrap import wrap
 from reportlab.lib.units import inch
 from fastapi import Depends
+from fastapi import Form
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -89,7 +90,7 @@ def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
 
 
 # --- background job that saves to results ---
-def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
+def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, order_id: str | None = None):
     try:
         compressed_path = compress_audio(temp_path)
         chunks = chunk_audio(compressed_path)
@@ -160,37 +161,24 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
         try:
             # Insert book and capture ID
             book_insert = supabase.table("user_books").insert({
-                "user_id": user_id,
-                "title": f"Session {upload_id[:8]}",
-                "content": chapters_text,
+            "user_id": user_id,
+            "title": f"Session {upload_id[:8]}",
+            "content": chapters_text,
             }).execute()
 
             if book_insert.data:
                 book_id = book_insert.data[0]["id"]
                 print(f"✅ Saved book {book_id} for user {user_id}")
 
-                # Find most recent order for this user and link it
-                order_res = (
-                    supabase.table("orders")
-                    .select("id")
-                    .eq("user_id", user_id)
-                    .order("created_at", desc=True)
-                    .limit(1)
-                    .execute()
-                )
-
-                if order_res.data:
-                    latest_order_id = order_res.data[0]["id"]
-                    supabase.table("orders") \
-                        .update({"book_id": book_id}) \
-                        .eq("id", latest_order_id) \
-                        .execute()
-                    print(f"✅ Linked order {latest_order_id} → book {book_id}")
+                if order_id:
+                    # ✅ Link this book directly to its own order
+                    supabase.table("orders").update({"book_id": book_id}).eq("id", order_id).execute()
+                    print(f"✅ Linked book {book_id} → order {order_id}")
                 else:
-                    print(f"⚠️ No order found to link for user {user_id}")
+                    print(f"⚠️ No order_id passed to link book {book_id}")
 
-        except Exception as db_err:
-            print("❌ Supabase insert failed:", db_err)
+        except Exception as e:
+            print("❌ Error in process_audio:", e)
 
     except Exception as e:
         results[upload_id] = {"status": "error", "error": str(e)}
@@ -217,7 +205,11 @@ def verify_token(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.post("/upload/")
-async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
+async def upload_audio(
+    file: UploadFile = File(...),
+    order_id: str = Form(None),
+    authorization: str = Header(None),
+):
     user_id = verify_token(authorization)
 
     # Try to get existing profile row
@@ -242,7 +234,7 @@ async def upload_audio(file: UploadFile = File(...), authorization: str = Header
     results[upload_id] = {"status": "processing"}
     threading.Thread(
         target=process_audio,
-        args=(upload_id, temp_path, user_id, has_paid),
+        args=(upload_id, temp_path, user_id, has_paid, order_id),  # 👈 include order_id
         daemon=True,
     ).start()
 
