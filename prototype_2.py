@@ -248,12 +248,16 @@ async def create_checkout_session(request: Request):
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         mode="payment",
-        customer_email=None,  # You could populate via Supabase user email if desired
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
         cancel_url="https://speech-to-text-o5lh.onrender.com/upload",
-        metadata={"user_id": user_id, "purchase_type": purchase_type},
+        metadata={
+            "user_id": user_id,
+            "order_type": purchase_type,  # 👈 renamed key
+            "title": "Speech-to-Book Order"
+        },
     )
+
     return {"url": session.url}
 
 @app.get("/download-latest-pdf")
