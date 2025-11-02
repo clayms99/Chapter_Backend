@@ -192,6 +192,10 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
         except Exception as db_err:
             print("❌ Supabase insert failed:", db_err)
 
+    except Exception as e:
+        results[upload_id] = {"status": "error", "error": str(e)}
+        print("❌ Error in process_audio:", e)
+
 
 
 def verify_token(authorization: str = Header(None)):
