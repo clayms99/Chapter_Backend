@@ -324,7 +324,7 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
     user_id = verify_token(authorization)
     print(f"✅ Authenticated PDF download for user {user_id}, order {order_id}")
 
-    # Find the book content from that order (assuming you saved a file_id or title)
+    # Find the book content for this order
     res = (
         supabase.table("user_books")
         .select("content")
@@ -338,7 +338,39 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
         raise HTTPException(status_code=404, detail="Book not found for this order")
 
     book_text = res.data[0]["content"]
-    # ... (generate PDF as in /download-latest-pdf)
+
+    # --- Generate PDF in memory ---
+    buffer = io.BytesIO()
+    p = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+
+    textobject = p.beginText()
+    textobject.setTextOrigin(inch, height - inch)
+    textobject.setFont("Helvetica", 12)
+
+    for paragraph in book_text.split("\n"):
+        for line in wrap(paragraph, 90):
+            textobject.textLine(line)
+        textobject.textLine("")
+        if textobject.getY() <= inch:
+            p.drawText(textobject)
+            p.showPage()
+            textobject = p.beginText()
+            textobject.setTextOrigin(inch, height - inch)
+            textobject.setFont("Helvetica", 12)
+
+    p.drawText(textobject)
+    p.save()
+    buffer.seek(0)
+
+    # ✅ Optional: mark the order as complete once the PDF is generated
+    try:
+        supabase.table("orders").update({"status": "Complete"}).eq("id", order_id).execute()
+    except Exception as e:
+        print("⚠️ Failed to update order status:", e)
+
+    headers = {"Content-Disposition": "attachment; filename=SpeechToBook.pdf"}
+    return StreamingResponse(buffer, headers=headers, media_type="application/pdf")
 
 
 @app.get("/orders/{user_id}")
