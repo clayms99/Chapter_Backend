@@ -108,7 +108,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
         if os.path.exists(compressed_path):
             os.remove(compressed_path)
 
-        # --- 🧠 GPT-4o processing (your original system prompt preserved)
+        # --- 🧠 GPT-4o processing ---
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -123,12 +123,10 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
                         "The number of chapters should depend on the transcript length: fewer chapters for short transcripts, "
                         "and more chapters for longer ones. "
                         "Each chapter must include a clear, engaging title and multiple detailed paragraphs (typically 5–12) "
-                        "that capture the key moments, transitions, and emotions of that section."
+                        "that capture the key moments, transitions, and emotions of that section. "
                         "Please write with natural transitions, avoiding repetitive introductions like 'In this section...' "
                         "and instead use smooth storytelling flow."
-
                     ),
-
                 },
                 {
                     "role": "user",
@@ -140,9 +138,9 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
 
         chapters_text = completion.choices[0].message.content.strip()
 
-        # --- ✂️ PREVIEW MODE (if unpaid, show partial output)
+        # --- ✂️ PREVIEW MODE ---
         if not has_paid:
-            preview_lines = chapters_text.splitlines()[:40]  # first ~40 lines
+            preview_lines = chapters_text.splitlines()[:40]
             preview_text = "\n".join(preview_lines) + "\n\n[...] Unlock full text with payment."
             results[upload_id] = {
                 "status": "done",
@@ -152,7 +150,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
             print(f"User {user_id} received preview only.")
             return
 
-        # --- 💾 Save full content for paying users
+        # --- 💾 FULL SAVE FOR PAYING USERS ---
         results[upload_id] = {
             "status": "done",
             "chapters": chapters_text,
@@ -172,15 +170,19 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
                 print(f"✅ Saved book {book_id} for user {user_id}")
 
                 # Link the most recent order for this user to the book
-                supabase.table("orders")\
-                    .update({"book_id": book_id})\
-                    .eq("user_id", user_id)\
-                    .order("created_at", desc=True)\
-                    .limit(1)\
+                supabase.table("orders") \
+                    .update({"book_id": book_id}) \
+                    .eq("user_id", user_id) \
+                    .order("created_at", desc=True) \
+                    .limit(1) \
                     .execute()
 
         except Exception as db_err:
-            print("Supabase insert failed:", db_err)
+            print("❌ Supabase insert failed:", db_err)
+
+    except Exception as e:
+        results[upload_id] = {"status": "error", "error": str(e)}
+        print("❌ Error in process_audio:", e)
 
 
 
