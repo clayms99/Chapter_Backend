@@ -324,23 +324,6 @@ async def get_orders(user_id: str):
     res = supabase.table("orders").select("*").eq("user_id", user_id).execute()
     return res.data
 
-@app.post("/webhook/stripe")
-async def stripe_webhook(request: Request):
-    event = await request.json()
-    # Verify and extract data
-    user_id = event["data"]["object"]["metadata"]["user_id"]
-    order_type = event["data"]["object"]["metadata"]["order_type"]  # pdf / print
-    title = event["data"]["object"]["metadata"]["title"]
-
-    supabase.table("orders").insert({
-        "user_id": user_id,
-        "title": title,
-        "type": order_type,
-        "status": "Processing"
-    }).execute()
-    return {"ok": True}
-
-
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
@@ -350,14 +333,35 @@ async def stripe_webhook(request: Request):
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
     except Exception as e:
+        print("❌ Stripe webhook verification failed:", e)
         return JSONResponse(status_code=400, content={"error": str(e)})
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        user_id = session["metadata"]["user_id"]
+        meta = session.get("metadata", {})
 
-        print("✅ Stripe webhook received for user:", user_id)
+        user_id = meta.get("user_id")
+        order_type = meta.get("order_type") or meta.get("purchase_type") or "pdf"
+        title = meta.get("title") or "Speech-to-Book Order"
+
+        if not user_id:
+            print("⚠️ Missing user_id in metadata, skipping order insert.")
+            return JSONResponse(status_code=200, content={"status": "missing user id"})
+
+        # ✅ Update profile
         supabase.table("profiles").update({"has_paid": True}).eq("id", user_id).execute()
+
+        # ✅ Insert order
+        try:
+            supabase.table("orders").insert({
+                "user_id": user_id,
+                "title": title,
+                "type": order_type,
+                "status": "Processing"
+            }).execute()
+            print(f"✅ Inserted order for user {user_id} ({order_type})")
+        except Exception as e:
+            print("❌ Failed to insert order:", e)
 
     return JSONResponse(status_code=200, content={"status": "success"})
 
