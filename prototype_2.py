@@ -217,28 +217,29 @@ DOMAIN = "https://speech-to-text-o5lh.onrender.com"  # your frontend URL
 @app.post("/create-checkout-session")
 async def create_checkout_session(request: Request):
     data = await request.json()
+    purchase_type = data.get("type")
     user_id = data.get("user_id")
 
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Missing user_id")
+    if purchase_type == "pdf":
+        price_id = os.getenv("STRIPE_PRICE_PDF")
+        success_url = "http://localhost:5173/pdf-download"
+    elif purchase_type == "book":
+        price_id = os.getenv("STRIPE_PRICE_BOOK")
+        success_url = "http://localhost:5173/book-customize"
+    else:
+        return JSONResponse({"error": "Invalid type"}, status_code=400)
 
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         mode="payment",
-        line_items=[{
-            "price_data": {
-                "currency": "usd",
-                "unit_amount": 500,  # $5.00
-                "product_data": {"name": "Speech-to-Book Access"},
-            },
-            "quantity": 1,
-        }],
-        success_url=f"{DOMAIN}/success",
-        cancel_url=f"{DOMAIN}/cancel",
-        metadata={"user_id": user_id},
+        customer_email=None,  # You could populate via Supabase user email if desired
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
+        cancel_url="http://localhost:5173/upload",
+        metadata={"user_id": user_id, "purchase_type": purchase_type},
     )
-
     return {"url": session.url}
+
 
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
