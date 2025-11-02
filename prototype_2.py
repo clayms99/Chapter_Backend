@@ -318,6 +318,28 @@ async def download_latest_pdf(authorization: str = Header(None)):
     except Exception as e:
         print("❌ Error generating PDF:", e)
         raise HTTPException(status_code=500, detail=f"Error generating PDF: {e}")
+    
+@app.get("/download/{order_id}")
+async def download_order_pdf(order_id: str, authorization: str = Header(None)):
+    user_id = verify_token(authorization)
+    print(f"✅ Authenticated PDF download for user {user_id}, order {order_id}")
+
+    # Find the book content from that order (assuming you saved a file_id or title)
+    res = (
+        supabase.table("user_books")
+        .select("content")
+        .eq("user_id", user_id)
+        .eq("id", order_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Book not found for this order")
+
+    book_text = res.data[0]["content"]
+    # ... (generate PDF as in /download-latest-pdf)
+
 
 @app.get("/orders/{user_id}")
 async def get_orders(user_id: str):
