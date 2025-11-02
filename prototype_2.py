@@ -108,11 +108,20 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool):
                 {
                     "role": "system",
                     "content": (
-                        "You are an editor who turns long-form spoken transcripts into "
-                        "structured, chaptered summaries. Each chapter should focus on a major topic shift, "
-                        "speaker transition, or narrative milestone. Each chapter must include a clear title "
-                        "and 2–5 short paragraphs summarizing that section."
+                        "You are an experienced editor and storyteller who transforms a long-form spoken transcript "
+                        "into a structured book-style narrative divided into chapters. "
+                        "Each chapter should cover a substantial portion of the conversation—typically several related ideas or stories—"
+                        "not just short topic shifts. "
+                        "Aim for rich, continuous prose with detailed paragraphs that flow naturally. "
+                        "The number of chapters should depend on the transcript length: fewer chapters for short transcripts, "
+                        "and more chapters for longer ones. "
+                        "Each chapter must include a clear, engaging title and multiple detailed paragraphs (typically 5–12) "
+                        "that capture the key moments, transitions, and emotions of that section."
+                        "Please write with natural transitions, avoiding repetitive introductions like 'In this section...' "
+                        "and instead use smooth storytelling flow."
+
                     ),
+
                 },
                 {
                     "role": "user",
