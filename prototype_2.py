@@ -189,9 +189,19 @@ def verify_token(authorization: str = Header(None)):
 async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
     user_id = verify_token(authorization)
 
-    # Check payment status
-    user = supabase.table("profiles").select("has_paid").eq("id", user_id).single().execute()
-    has_paid = user.data.get("has_paid") if user.data else False
+    # Try to get existing profile row
+    user_resp = supabase.table("profiles").select("has_paid").eq("id", user_id).execute()
+    user_data = user_resp.data or []
+
+    if not user_data:
+        print(f"⚠️ No profile found for {user_id}, creating one...")
+        supabase.table("profiles").insert({
+            "id": user_id,
+            "has_paid": False
+        }).execute()
+        has_paid = False
+    else:
+        has_paid = user_data[0].get("has_paid", False)
 
     upload_id = str(uuid.uuid4())
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
@@ -200,13 +210,12 @@ async def upload_audio(file: UploadFile = File(...), authorization: str = Header
 
     results[upload_id] = {"status": "processing"}
     threading.Thread(
-        target=process_audio, 
-        args=(upload_id, temp_path, user_id, has_paid),  # 👈 pass payment status
-        daemon=True
+        target=process_audio,
+        args=(upload_id, temp_path, user_id, has_paid),
+        daemon=True,
     ).start()
 
     return {"id": upload_id, "status": "processing"}
-
 
 @app.get("/result/{upload_id}")
 def get_result(upload_id: str):
