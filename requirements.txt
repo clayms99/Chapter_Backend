@@ -8,3 +8,4 @@ imageio-ffmpeg
 python-jose
 python-multipart
 PyJWT
+reportlab

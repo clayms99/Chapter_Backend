@@ -12,6 +12,11 @@ from fastapi.responses import JSONResponse
 from fastapi import Header
 import jwt  # from PyJWT, not jose
 from fastapi import Header, HTTPException, status
+from fastapi.responses import StreamingResponse
+import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -248,6 +253,56 @@ async def create_checkout_session(request: Request):
         metadata={"user_id": user_id, "purchase_type": purchase_type},
     )
     return {"url": session.url}
+
+@app.get("/download-latest-pdf")
+async def download_latest_pdf(authorization: str = Header(None)):
+    """
+    Return the most recent book for the authenticated user as a downloadable PDF.
+    """
+    try:
+        user_id = verify_token(authorization)
+        print(f"✅ Authenticated PDF download for user: {user_id}")
+
+        # --- Fetch the latest user book from Supabase ---
+        res = (
+            supabase.table("user_books")
+            .select("content")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if not res.data:
+            raise HTTPException(status_code=404, detail="No book found for this user.")
+
+        book_text = res.data[0]["content"]
+
+        # --- Generate the PDF in memory ---
+        buffer = io.BytesIO()
+        p = canvas.Canvas(buffer, pagesize=letter)
+        width, height = letter
+
+        lines = book_text.split("\n")
+        y = height - 72
+        for line in lines:
+            if y < 72:
+                p.showPage()
+                y = height - 72
+            p.drawString(72, y, line[:110])  # crude wrapping
+            y -= 14
+
+        p.save()
+        buffer.seek(0)
+
+        headers = {"Content-Disposition": "attachment; filename=SpeechToBook.pdf"}
+        return StreamingResponse(buffer, headers=headers, media_type="application/pdf")
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print("❌ Error generating PDF:", e)
+        raise HTTPException(status_code=500, detail=f"Error generating PDF: {e}")
 
 
 @app.post("/webhook")
