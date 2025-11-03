@@ -20,6 +20,7 @@ from textwrap import wrap
 from reportlab.lib.units import inch
 from fastapi import Depends
 from fastapi import Form
+from fastapi.responses import Response
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -203,6 +204,10 @@ def verify_token(authorization: str = Header(None)):
     except Exception as e:
         print("❌ JWT decode failed:", str(e))
         raise HTTPException(status_code=401, detail="Invalid token")
+
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return Response(status_code=200)
 
 @app.post("/upload/")
 async def upload_audio(
