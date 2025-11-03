@@ -207,38 +207,25 @@ def verify_token(authorization: str = Header(None)):
 @app.post("/upload/")
 async def upload_audio(
     file: UploadFile = File(...),
-    order_id: str = Form(None),
     authorization: str = Header(None),
 ):
     user_id = verify_token(authorization)
-
-    # Try to get existing profile row
-    user_resp = supabase.table("profiles").select("has_paid").eq("id", user_id).execute()
-    user_data = user_resp.data or []
-
-    if not user_data:
-        print(f"⚠️ No profile found for {user_id}, creating one...")
-        supabase.table("profiles").insert({
-            "id": user_id,
-            "has_paid": False
-        }).execute()
-        has_paid = False
-    else:
-        has_paid = user_data[0].get("has_paid", False)
-
     upload_id = str(uuid.uuid4())
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
         temp_audio.write(await file.read())
         temp_path = temp_audio.name
 
-    results[upload_id] = {"status": "processing"}
+    results[upload_id] = {"status": "processing", "paid": False}  # 👈 start unpaid
+
     threading.Thread(
         target=process_audio,
-        args=(upload_id, temp_path, user_id, has_paid, order_id),  # 👈 include order_id
+        args=(upload_id, temp_path, user_id, False),  # 👈 always unpaid initially
         daemon=True,
     ).start()
 
     return {"id": upload_id, "status": "processing"}
+
 
 @app.get("/result/{upload_id}")
 def get_result(upload_id: str):
@@ -251,31 +238,33 @@ async def create_checkout_session(request: Request):
     data = await request.json()
     purchase_type = data.get("type")
     user_id = data.get("user_id")
+    upload_id = data.get("upload_id")  # 👈 new
 
     if purchase_type == "pdf":
         price_id = os.getenv("STRIPE_PRICE_PDF")
-        success_url = "https://speech-to-text-o5lh.onrender.com/pdf-download"
+        success_url = f"{DOMAIN}/pdf-download"
     elif purchase_type == "book":
         price_id = os.getenv("STRIPE_PRICE_BOOK")
-        success_url = "https://speech-to-text-o5lh.onrender.com/book-customize"
+        success_url = f"{DOMAIN}/book-customize"
     else:
         return JSONResponse({"error": "Invalid type"}, status_code=400)
 
     session = stripe.checkout.Session.create(
-    payment_method_types=["card"],
-    mode="payment",
-    line_items=[{"price": price_id, "quantity": 1}],
-    success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
-    cancel_url="https://speech-to-text-o5lh.onrender.com/upload",
-    metadata={
-        "user_id": user_id,
-        "order_type": purchase_type,  # renamed from purchase_type
-        "title": "Bookify Order",
+        payment_method_types=["card"],
+        mode="payment",
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
+        cancel_url=f"{DOMAIN}/upload",
+        metadata={
+            "user_id": user_id,
+            "upload_id": upload_id,  # 👈 pass this through
+            "order_type": purchase_type,
+            "title": "Bookify Order",
         },
     )
 
-
     return {"url": session.url}
+
 
 @app.get("/download-latest-pdf")
 async def download_latest_pdf(authorization: str = Header(None)):
@@ -433,36 +422,29 @@ async def stripe_webhook(request: Request):
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         meta = session.get("metadata", {})
-
         user_id = meta.get("user_id")
-        order_type = meta.get("order_type") or meta.get("purchase_type") or "pdf"
+        upload_id = meta.get("upload_id")  # 👈 added
+        order_type = meta.get("order_type") or "pdf"
         title = meta.get("title") or "Bookify Order"
 
-        if not user_id:
-            print("⚠️ Missing user_id in metadata, skipping order insert.")
-            return JSONResponse(status_code=200, content={"status": "missing user id"})
+        if not user_id or not upload_id:
+            print("⚠️ Missing user_id or upload_id")
+            return JSONResponse(status_code=200, content={"status": "missing fields"})
 
-        # ✅ Update profile
-        supabase.table("profiles").update({"has_paid": True}).eq("id", user_id).execute()
+        # ✅ Insert order (as before)
+        order_insert = supabase.table("orders").insert({
+            "user_id": user_id,
+            "title": title,
+            "type": order_type,
+            "status": "Processing"
+        }).execute()
+        order_id = order_insert.data[0]["id"] if order_insert.data else None
 
-        # ✅ Insert order
-        try:
-            if order_type == "pdf":
-                status_type = "Complete"
-            else:
-                status_type = "Processing"
-            supabase.table("orders").insert({
-                "user_id": user_id,
-                "title": title,
-                "type": order_type,
-                "status": status_type
-            }).execute()
-            print(f"✅ Inserted order for user {user_id} ({order_type})")
-        except Exception as e:
-            print("❌ Failed to insert order:", e)
+        # ✅ Mark upload as paid
+        results[upload_id] = {**results.get(upload_id, {}), "paid": True, "order_id": order_id}
+        print(f"✅ Payment confirmed for upload {upload_id} (user {user_id})")
 
     return JSONResponse(status_code=200, content={"status": "success"})
-
 
 # optional: serve frontend if bundled
 if os.path.exists("static/dist"):
