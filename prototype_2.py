@@ -437,11 +437,15 @@ async def stripe_webhook(request: Request):
             return JSONResponse(status_code=200, content={"status": "missing fields"})
 
         # ✅ Insert order (as before)
+        if order_type == "pdf":
+            status_order = "Complete"
+        else:
+            status_order = "Processing"
         order_insert = supabase.table("orders").insert({
             "user_id": user_id,
             "title": title,
             "type": order_type,
-            "status": "Processing"
+            "status": status_order
         }).execute()
         order_id = order_insert.data[0]["id"] if order_insert.data else None
 
