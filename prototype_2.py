@@ -274,25 +274,31 @@ async def upload_audio(
         temp_audio.write(await file.read())
         temp_path = temp_audio.name
 
-    # After saving temp file
+    # Save the raw audio to Supabase storage
     storage_audio_path = f"uploads/{user_id}/{upload_id}.mp3"
     with open(temp_path, "rb") as f:
         supabase.storage.from_("raw_audio").upload(storage_audio_path, f)
+    print(f"✅ Uploaded raw audio to Supabase: {storage_audio_path}")
 
-    # Keep the path reference
-    results[upload_id] = {
-        "status": "processing",
-        "paid": False,
+    # Save the upload metadata in Supabase for webhook access
+    supabase.table("upload_sessions").insert({
+        "id": upload_id,
+        "user_id": user_id,
         "audio_path": storage_audio_path,
-    }
+        "status": "preview",
+    }).execute()
+    print(f"🗂️ Recorded upload session {upload_id} in Supabase")
+
+    results[upload_id] = {"status": "processing", "paid": False}
 
     threading.Thread(
         target=process_audio,
-        args=(upload_id, temp_path, user_id, False),  # 👈 always unpaid initially
+        args=(upload_id, temp_path, user_id, False),
         daemon=True,
     ).start()
 
     return {"id": upload_id, "status": "processing"}
+
 
 
 @app.get("/result/{upload_id}")
@@ -477,6 +483,7 @@ async def get_orders(user_id: str):
 
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
+    """Handles Stripe webhook events to confirm payment and trigger full book generation."""
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
     endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
@@ -496,10 +503,10 @@ async def stripe_webhook(request: Request):
         title = meta.get("title") or "Bookify Order"
 
         if not user_id or not upload_id:
-            print("⚠️ Missing user_id or upload_id")
+            print("⚠️ Missing user_id or upload_id in Stripe metadata")
             return JSONResponse(status_code=200, content={"status": "missing fields"})
 
-        # ✅ Create order record
+        # ✅ Create an order record
         status_order = "Complete" if order_type == "pdf" else "Processing"
         order_insert = supabase.table("orders").insert({
             "user_id": user_id,
@@ -507,41 +514,48 @@ async def stripe_webhook(request: Request):
             "type": order_type,
             "status": status_order
         }).execute()
+
         order_id = order_insert.data[0]["id"] if order_insert.data else None
+        print(f"✅ Payment confirmed for upload {upload_id} (user {user_id}) → order {order_id}")
 
-        # ✅ Restore upload state (from memory if same instance)
-        upload_state = results.get(upload_id, {})
-        results[upload_id] = {**upload_state, "paid": True, "order_id": order_id}
+        # ✅ Look up stored audio path from upload_sessions
+        upload_row = (
+            supabase.table("upload_sessions")
+            .select("audio_path")
+            .eq("id", upload_id)
+            .single()
+            .execute()
+        )
+        audio_path = upload_row.data["audio_path"] if upload_row.data else None
 
-        # 🔁 If preview already completed, re-process full version
-        if upload_state.get("status") == "done" and upload_state.get("is_preview"):
-            audio_path = upload_state.get("audio_path")
-            if audio_path:
-                print(f"🔁 Reprocessing {upload_id} from Supabase storage…")
+        if not audio_path:
+            print(f"⚠️ No audio_path found in upload_sessions for {upload_id}, cannot reprocess.")
+            return JSONResponse(status_code=200, content={"status": "missing audio_path"})
 
-                try:
-                    data = supabase.storage.from_("raw_audio").download(audio_path)
-                    temp_path = tempfile.mktemp(suffix=".mp3")
-                    # handle both old/new supabase-py return types
-                    if hasattr(data, "content"):
-                        with open(temp_path, "wb") as f:
-                            f.write(data.content)
-                    else:
-                        with open(temp_path, "wb") as f:
-                            f.write(data)
+        print(f"🔁 Reprocessing {upload_id} from Supabase storage: {audio_path}")
 
-                    threading.Thread(
-                        target=process_audio,
-                        args=(upload_id, temp_path, user_id, True, order_id),
-                        daemon=True,
-                    ).start()
-                except Exception as e:
-                    print(f"❌ Failed to download or reprocess {upload_id}: {e}")
-            else:
-                print(f"⚠️ No audio_path recorded for {upload_id}, cannot reprocess.")
-        else:
-            print(f"ℹ️ Upload {upload_id} not in preview-done state; skipping reprocess.")
+        try:
+            # Download the audio file from Supabase Storage
+            file_data = supabase.storage.from_("raw_audio").download(audio_path)
+            temp_path = tempfile.mktemp(suffix=".mp3")
+            with open(temp_path, "wb") as f:
+                f.write(getattr(file_data, "content", file_data))
+            print(f"✅ Downloaded raw audio to {temp_path}")
 
+            # Launch background thread to generate full book and PDF
+            threading.Thread(
+                target=process_audio,
+                args=(upload_id, temp_path, user_id, True, order_id),
+                daemon=True,
+            ).start()
+
+            # Update upload_sessions to mark completion
+            supabase.table("upload_sessions").update({"status": "processing"}).eq("id", upload_id).execute()
+        except Exception as e:
+            print(f"❌ Error reprocessing {upload_id} from Supabase:", e)
+            return JSONResponse(status_code=500, content={"error": str(e)})
+
+    # Respond to Stripe immediately (do not wait for background thread)
     return JSONResponse(status_code=200, content={"status": "success"})
 
 
