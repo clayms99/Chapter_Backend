@@ -22,6 +22,13 @@ from fastapi import Depends
 from fastapi import Form
 from fastapi.responses import Response
 
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.units import inch
+import tempfile
+
+
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -89,6 +96,32 @@ def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
 
     return chunk_paths
 
+def make_book_pdf(chapter_text: str, user_name: str = "User") -> str:
+    """Generate a clean multi-page PDF from the chapter text."""
+    styles = getSampleStyleSheet()
+    pdf_path = tempfile.mktemp(suffix=".pdf")
+    doc = SimpleDocTemplate(pdf_path, pagesize=LETTER,
+                            rightMargin=inch, leftMargin=inch,
+                            topMargin=inch, bottomMargin=inch)
+    story = []
+    story.append(Paragraph(f"<b>{user_name}'s Book</b>", styles["Title"]))
+    story.append(Spacer(1, 0.25 * inch))
+
+    for paragraph in chapter_text.split("\n\n"):
+        story.append(Paragraph(paragraph.strip(), styles["Normal"]))
+        story.append(Spacer(1, 0.2 * inch))
+
+    doc.build(story)
+    return pdf_path
+
+def send_to_printer(pdf_path: str, user_id: str, order_id: str):
+    print(f"🖨️ (stub) Would send {pdf_path} to print for user {user_id}, order {order_id}")
+    # TODO: Replace this with Lulu API integration later
+    # Example:
+    # response = requests.post("https://api.lulu.com/print-jobs/", ...)
+    # supabase.table("orders").update({"status": "Printing"}).eq("id", order_id).execute()
+
+
 
 # --- background job that saves to results ---
 def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, order_id: str | None = None):
@@ -142,7 +175,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
 
         # --- ✂️ PREVIEW MODE ---
         if not has_paid:
-            preview_lines = chapters_text.splitlines()[:40]
+            preview_lines = chapters_text.splitlines()[:20]
             preview_text = "\n".join(preview_lines) + "\n\n[...] Unlock full text with payment."
             results[upload_id] = {
                 "status": "done",
@@ -152,39 +185,50 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             print(f"User {user_id} received preview only.")
             return
 
-        # --- 💾 FULL SAVE FOR PAYING USERS ---
+        # --- 🧾 Paid version ---
         results[upload_id] = {
             "status": "done",
             "chapters": chapters_text,
             "is_preview": False,
         }
 
-        try:
-            # Insert book and capture ID
-            book_insert = supabase.table("user_books").insert({
+        # --- 🖨️ Generate PDF for printing ---
+        pdf_path = make_book_pdf(chapters_text, user_id)
+        print(f"✅ Created book PDF at {pdf_path}")
+
+        # --- 💾 Upload to Supabase Storage ---
+        storage_path = f"books/{user_id}/{upload_id}.pdf"
+        with open(pdf_path, "rb") as f:
+            supabase.storage.from_("book_files").upload(storage_path, f)
+        print(f"✅ Uploaded PDF to Supabase storage: {storage_path}")
+
+        # --- 🧠 Insert into user_books ---
+        book_insert = supabase.table("user_books").insert({
             "user_id": user_id,
             "title": f"Session {upload_id[:8]}",
             "content": chapters_text,
-            }).execute()
+            "pdf_path": storage_path,   # 👈 optional column to store where the file lives
+        }).execute()
 
-            if book_insert.data:
-                book_id = book_insert.data[0]["id"]
-                print(f"✅ Saved book {book_id} for user {user_id}")
+        book_id = None
+        if book_insert.data:
+            book_id = book_insert.data[0]["id"]
+            print(f"✅ Saved book {book_id} for user {user_id}")
 
-                if order_id:
-                    # ✅ Link this book directly to its own order
-                    supabase.table("orders").update({"book_id": book_id}).eq("id", order_id).execute()
-                    print(f"✅ Linked book {book_id} → order {order_id}")
-                else:
-                    print(f"⚠️ No order_id passed to link book {book_id}")
+        # --- 🔗 Link book to order if it exists ---
+        if order_id and book_id:
+            supabase.table("orders").update({"book_id": book_id}).eq("id", order_id).execute()
+            print(f"✅ Linked book {book_id} → order {order_id}")
 
-        except Exception as e:
-            print("❌ Error in process_audio:", e)
+            # If this order was a “book” purchase, send to printer
+            order_data = supabase.table("orders").select("type").eq("id", order_id).single().execute()
+            if order_data.data and order_data.data["type"] == "book":
+                print("🚀 Sending book to printer API...")
+                send_to_printer(pdf_path, user_id, order_id)
 
     except Exception as e:
         results[upload_id] = {"status": "error", "error": str(e)}
         print("❌ Error in process_audio:", e)
-
 
 
 def verify_token(authorization: str = Header(None)):
