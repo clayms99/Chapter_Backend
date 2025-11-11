@@ -265,7 +265,12 @@ async def upload_audio(
         temp_audio.write(await file.read())
         temp_path = temp_audio.name
 
-    results[upload_id] = {"status": "processing", "paid": False}  # 👈 start unpaid
+    results[upload_id] = {
+    "status": "processing",
+    "paid": False,
+    "temp_path": temp_path,  # 👈 add this
+    }
+
 
     threading.Thread(
         target=process_audio,
@@ -472,7 +477,7 @@ async def stripe_webhook(request: Request):
         session = event["data"]["object"]
         meta = session.get("metadata", {})
         user_id = meta.get("user_id")
-        upload_id = meta.get("upload_id")  # 👈 added
+        upload_id = meta.get("upload_id")
         order_type = meta.get("order_type") or "pdf"
         title = meta.get("title") or "Bookify Order"
 
@@ -480,11 +485,8 @@ async def stripe_webhook(request: Request):
             print("⚠️ Missing user_id or upload_id")
             return JSONResponse(status_code=200, content={"status": "missing fields"})
 
-        # ✅ Insert order (as before)
-        if order_type == "pdf":
-            status_order = "Complete"
-        else:
-            status_order = "Processing"
+        # ✅ Create order record
+        status_order = "Complete" if order_type == "pdf" else "Processing"
         order_insert = supabase.table("orders").insert({
             "user_id": user_id,
             "title": title,
@@ -493,11 +495,26 @@ async def stripe_webhook(request: Request):
         }).execute()
         order_id = order_insert.data[0]["id"] if order_insert.data else None
 
-        # ✅ Mark upload as paid
-        results[upload_id] = {**results.get(upload_id, {}), "paid": True, "order_id": order_id}
+        # ✅ Mark upload paid
+        upload_state = results.get(upload_id, {})
+        results[upload_id] = {**upload_state, "paid": True, "order_id": order_id}
         print(f"✅ Payment confirmed for upload {upload_id} (user {user_id})")
 
+        # 🔁 If it already finished in preview mode, rerun as paid
+        if upload_state.get("status") == "done" and upload_state.get("is_preview"):
+            temp_path = upload_state.get("temp_path")
+            if temp_path and os.path.exists(temp_path):
+                print(f"🔁 Reprocessing {upload_id} now that payment is confirmed...")
+                threading.Thread(
+                    target=process_audio,
+                    args=(upload_id, temp_path, user_id, True, order_id),
+                    daemon=True,
+                ).start()
+            else:
+                print(f"⚠️ No temp file left for {upload_id}, cannot reprocess.")
+
     return JSONResponse(status_code=200, content={"status": "success"})
+
 
 # optional: serve frontend if bundled
 if os.path.exists("static/dist"):
