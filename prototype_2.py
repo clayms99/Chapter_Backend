@@ -139,9 +139,18 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             os.remove(path)
 
         full_text = "\n".join(transcripts)
-        os.remove(temp_path)
-        if os.path.exists(compressed_path):
-            os.remove(compressed_path)
+
+        # ❗ only delete source files *after* successful paid processing
+        if has_paid:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            if os.path.exists(compressed_path):
+                os.remove(compressed_path)
+        else:
+            print(f"⏸ Keeping temp file for preview {upload_id} to allow reprocess later.")
+
+        # --- GPT-4o and rest unchanged ---
+
 
         # --- 🧠 GPT-4o processing ---
         completion = client.chat.completions.create(
