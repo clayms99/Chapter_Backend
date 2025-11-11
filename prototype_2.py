@@ -274,12 +274,17 @@ async def upload_audio(
         temp_audio.write(await file.read())
         temp_path = temp_audio.name
 
-    results[upload_id] = {
-    "status": "processing",
-    "paid": False,
-    "temp_path": temp_path,  # 👈 add this
-    }
+    # After saving temp file
+    storage_audio_path = f"uploads/{user_id}/{upload_id}.mp3"
+    with open(temp_path, "rb") as f:
+        supabase.storage.from_("raw_audio").upload(storage_audio_path, f)
 
+    # Keep the path reference
+    results[upload_id] = {
+        "status": "processing",
+        "paid": False,
+        "audio_path": storage_audio_path,
+    }
 
     threading.Thread(
         target=process_audio,
@@ -504,23 +509,38 @@ async def stripe_webhook(request: Request):
         }).execute()
         order_id = order_insert.data[0]["id"] if order_insert.data else None
 
-        # ✅ Mark upload paid
+        # ✅ Restore upload state (from memory if same instance)
         upload_state = results.get(upload_id, {})
         results[upload_id] = {**upload_state, "paid": True, "order_id": order_id}
-        print(f"✅ Payment confirmed for upload {upload_id} (user {user_id})")
 
-        # 🔁 If it already finished in preview mode, rerun as paid
+        # 🔁 If preview already completed, re-process full version
         if upload_state.get("status") == "done" and upload_state.get("is_preview"):
-            temp_path = upload_state.get("temp_path")
-            if temp_path and os.path.exists(temp_path):
-                print(f"🔁 Reprocessing {upload_id} now that payment is confirmed...")
-                threading.Thread(
-                    target=process_audio,
-                    args=(upload_id, temp_path, user_id, True, order_id),
-                    daemon=True,
-                ).start()
+            audio_path = upload_state.get("audio_path")
+            if audio_path:
+                print(f"🔁 Reprocessing {upload_id} from Supabase storage…")
+
+                try:
+                    data = supabase.storage.from_("raw_audio").download(audio_path)
+                    temp_path = tempfile.mktemp(suffix=".mp3")
+                    # handle both old/new supabase-py return types
+                    if hasattr(data, "content"):
+                        with open(temp_path, "wb") as f:
+                            f.write(data.content)
+                    else:
+                        with open(temp_path, "wb") as f:
+                            f.write(data)
+
+                    threading.Thread(
+                        target=process_audio,
+                        args=(upload_id, temp_path, user_id, True, order_id),
+                        daemon=True,
+                    ).start()
+                except Exception as e:
+                    print(f"❌ Failed to download or reprocess {upload_id}: {e}")
             else:
-                print(f"⚠️ No temp file left for {upload_id}, cannot reprocess.")
+                print(f"⚠️ No audio_path recorded for {upload_id}, cannot reprocess.")
+        else:
+            print(f"ℹ️ Upload {upload_id} not in preview-done state; skipping reprocess.")
 
     return JSONResponse(status_code=200, content={"status": "success"})
 
