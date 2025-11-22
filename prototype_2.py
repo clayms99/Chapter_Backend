@@ -27,6 +27,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.units import inch
 import tempfile
+import requests
+
 
 load_dotenv()
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -35,6 +37,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+LULU_CLIENT_KEY = os.getenv("LULU_CLIENT_KEY")
+LULU_CLIENT_SECRET = os.getenv("LULU_CLIENT_SECRET")
+LULU_BASE_URL = os.getenv("LULU_BASE_URL", "https://api.sandbox.lulu.com")
+LULU_POD_PACKAGE_ID = os.getenv("LULU_POD_PACKAGE_ID")
+LULU_CONTACT_EMAIL = os.getenv("LULU_CONTACT_EMAIL", "you@yourdomain.com")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = FastAPI()
@@ -64,6 +71,23 @@ def compress_audio(input_path: str) -> str:
     )
     return output_path
 
+def get_lulu_token() -> str:
+    """
+    Get OAuth2 access token from Lulu using client_credentials.
+    """
+    token_url = f"{LULU_BASE_URL}/auth/realms/glasstree/protocol/openid-connect/token"
+    data = {"grant_type": "client_credentials"}
+
+    resp = requests.post(
+        token_url,
+        data=data,
+        auth=(LULU_CLIENT_KEY, LULU_CLIENT_SECRET),
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Lulu token error {resp.status_code}: {resp.text}")
+
+    return resp.json()["access_token"]
 
 def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
     size = os.path.getsize(file_path)
@@ -112,12 +136,113 @@ def make_book_pdf(chapter_text: str, user_name: str = "User") -> str:
     doc.build(story)
     return pdf_path
 
-def send_to_printer(pdf_path: str, user_id: str, order_id: str):
-    print(f"🖨️ (stub) Would send {pdf_path} to print for user {user_id}, order {order_id}")
-    # TODO: Replace this with Lulu API integration later
-    # Example:
-    # response = requests.post("https://api.lulu.com/print-jobs/", ...)
-    # supabase.table("orders").update({"status": "Printing"}).eq("id", order_id).execute()
+def send_to_printer(storage_path: str, user_id: str, order_id: str):
+    """
+    storage_path: path in 'book_files' bucket (e.g. 'books/<user>/<upload>.pdf')
+    """
+
+    # 1) Get public URL to the PDF
+    public_res = supabase.storage.from_("book_files").get_public_url(storage_path)
+
+    if isinstance(public_res, str):
+        public_url = public_res
+    else:
+        # Fallback if a future version returns a dict-like structure
+        public_url = (
+            getattr(public_res, "public_url", None)
+            or getattr(public_res, "publicUrl", None)
+            or (public_res.get("publicUrl") if isinstance(public_res, dict) else None)
+            or (public_res.get("public_url") if isinstance(public_res, dict) else None)
+        )
+
+    if not public_url:
+        print(f"❌ Could not get public URL for {storage_path}: {public_res}")
+        return
+
+    print(f"🌐 Lulu will fetch interior PDF from {public_url}")
+
+    # 2) (Optional for now) – load shipping address from your DB
+    #    For MVP you could ship everything to yourself or a fixed address.
+    #    Later, you'll store shipping info on `orders` from BookCustomize.tsx.
+    order_row = (
+        supabase.table("orders")
+        .select("*")
+        .eq("id", order_id)
+        .single()
+        .execute()
+    )
+    order_data = order_row.data or {}
+
+    # TODO: replace these with real columns once BookCustomize collects them
+    shipping_address = {
+    "name": order_data.get("ship_name", "Bookify Test User"),
+    "street1": order_data.get("ship_line1", "123 Test St"),
+    "city": order_data.get("ship_city", "Durham"),
+    "state_code": order_data.get("ship_state", "NC"),
+    "country_code": order_data.get("ship_country", "US"),
+    "postcode": order_data.get("ship_postal", "27701"),
+    "phone_number": order_data.get("ship_phone", "+15555555555"),
+    }
+
+
+    # 3) Build the Lulu Print-Job payload
+    #    See Lulu docs: POST /print-jobs/ with line_items, shipping_address,
+    #    shipping_option_level, contact_email, etc. :contentReference[oaicite:3]{index=3}
+
+    payload = {
+        "contact_email": LULU_CONTACT_EMAIL,
+        "shipping_address": shipping_address,
+        "shipping_option_level": "MAIL",   # or PRIORITY_MAIL, GROUND, EXPEDITED, EXPRESS
+        "external_id": str(order_id),
+
+        "line_items": [
+            {
+                "pod_package_id": LULU_POD_PACKAGE_ID,
+                "quantity": 1,
+                "title": order_data.get("title", f"Bookify Order {order_id[:8]}"),
+                "printable_normalization": {
+                    # In a perfect world you'd provide separate interior + cover PDFs.
+                    # For MVP you can use the same PDF for both, or just interior
+                    # if your product/package allows it.
+                    "cover": {
+                        "source_url": public_url,
+                    },
+                    "interior": {
+                        "source_url": public_url,
+                    },
+                },
+            }
+        ],
+    }
+
+    token = get_lulu_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    print("📦 Creating Lulu Print-Job...")
+    resp = requests.post(
+        f"{LULU_BASE_URL}/print-jobs/",
+        json=payload,
+        headers=headers,
+        timeout=30,
+    )
+
+    if resp.status_code not in (200, 201):
+        print(f"❌ Lulu print-job error {resp.status_code}: {resp.text}")
+        # optionally update orders.status = 'Print Error'
+        supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
+        return
+
+    job = resp.json()
+    print(f"✅ Lulu Print-Job created: {job.get('id')}")
+    # You may want to save Lulu's job ID:
+    supabase.table("orders").update({
+        "status": "Printing",
+        "lulu_job_id": job.get("id")
+    }).eq("id", order_id).execute()
+
 
 
 
@@ -234,7 +359,9 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             order_data = supabase.table("orders").select("type").eq("id", order_id).single().execute()
             if order_data.data and order_data.data["type"] == "book":
                 print("🚀 Sending book to printer API...")
-                send_to_printer(pdf_path, user_id, order_id)
+                # Pass storage path (in your bucket), not local /tmp path
+                send_to_printer(storage_path, user_id, order_id)
+
 
         # --- 🏁 Mark upload as fully complete in DB ---
         try:
