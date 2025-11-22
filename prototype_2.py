@@ -28,7 +28,7 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.units import inch
 import tempfile
 
-
+load_dotenv()
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -36,8 +36,6 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-
-load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = FastAPI()
 
@@ -227,6 +225,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             print(f"✅ Saved book {book_id} for user {user_id}")
 
         # --- 🔗 Link book to order if it exists ---
+        # --- 🔗 Link book to order if it exists ---
         if order_id and book_id:
             supabase.table("orders").update({"book_id": book_id}).eq("id", order_id).execute()
             print(f"✅ Linked book {book_id} → order {order_id}")
@@ -236,6 +235,16 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             if order_data.data and order_data.data["type"] == "book":
                 print("🚀 Sending book to printer API...")
                 send_to_printer(pdf_path, user_id, order_id)
+
+        # --- 🏁 Mark upload as fully complete in DB ---
+        try:
+            supabase.table("upload_sessions").update({
+                "status": "complete"
+            }).eq("id", upload_id).execute()
+            print(f"🏁 upload_sessions status updated to 'complete' for {upload_id}")
+        except Exception as e:
+            print(f"⚠️ Failed to update upload_sessions status for {upload_id}: {e}")
+
 
     except Exception as e:
         import traceback
@@ -298,7 +307,7 @@ async def upload_audio(
     threading.Thread(
         target=process_audio,
         args=(upload_id, temp_path, user_id, False),
-        daemon=True,
+        daemon=False,
     ).start()
 
     return {"id": upload_id, "status": "processing"}
@@ -550,7 +559,7 @@ async def stripe_webhook(request: Request):
             threading.Thread(
                 target=process_audio,
                 args=(upload_id, temp_path, user_id, True, order_id),
-                daemon=True,
+                daemon=False,
             ).start()
 
             # Update upload_sessions to mark completion
