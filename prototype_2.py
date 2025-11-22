@@ -125,6 +125,8 @@ def send_to_printer(pdf_path: str, user_id: str, order_id: str):
 
 # --- background job that saves to results ---
 def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, order_id: str | None = None):
+    print(f"▶️ process_audio START upload_id={upload_id}, has_paid={has_paid}, order_id={order_id}, temp_path={temp_path}")
+
     try:
         compressed_path = compress_audio(temp_path)
         chunks = chunk_audio(compressed_path)
@@ -181,7 +183,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
         )
 
         chapters_text = completion.choices[0].message.content.strip()
-
+        print(f"✅ Whisper + GPT done for upload_id={upload_id}, has_paid={has_paid}")
         # --- ✂️ PREVIEW MODE ---
         if not has_paid:
             preview_lines = chapters_text.splitlines()[:20]
@@ -236,6 +238,8 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
                 send_to_printer(pdf_path, user_id, order_id)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         results[upload_id] = {"status": "error", "error": str(e)}
         print("❌ Error in process_audio:", e)
 
