@@ -190,14 +190,15 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
     payload = {
         "contact_email": LULU_CONTACT_EMAIL,
         "shipping_address": shipping_address,
-        "shipping_option_level": "MAIL",   # MAIL, PRIORITY_MAIL, GROUND, etc.
+        "shipping_option_level": "MAIL",   # or PRIORITY_MAIL, etc.
         "external_id": str(order_id),
+
         "line_items": [
             {
-                "pod_package_id": LULU_POD_PACKAGE_ID,
                 "quantity": 1,
                 "title": order_data.get("title", f"Bookify Order {order_id[:8]}"),
                 "printable_normalization": {
+                    "pod_package_id": LULU_POD_PACKAGE_ID,
                     "cover": {
                         "source_url": public_url,
                     },
@@ -208,6 +209,7 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
             }
         ],
     }
+
 
     try:
         token = get_lulu_token()
