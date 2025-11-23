@@ -141,13 +141,14 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
     storage_path: path in 'book_files' bucket (e.g. 'books/<user>/<upload>.pdf')
     """
 
-    # 1) Get public URL to the PDF
+    # 1) Get public URL to the PDF from Supabase
     public_res = supabase.storage.from_("book_files").get_public_url(storage_path)
 
+    # supabase-py typically returns a plain string URL
     if isinstance(public_res, str):
         public_url = public_res
     else:
-        # Fallback if a future version returns a dict-like structure
+        # fallback in case future versions return a dict-like structure
         public_url = (
             getattr(public_res, "public_url", None)
             or getattr(public_res, "publicUrl", None)
@@ -157,13 +158,12 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
 
     if not public_url:
         print(f"❌ Could not get public URL for {storage_path}: {public_res}")
+        supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
         return
 
     print(f"🌐 Lulu will fetch interior PDF from {public_url}")
 
-    # 2) (Optional for now) – load shipping address from your DB
-    #    For MVP you could ship everything to yourself or a fixed address.
-    #    Later, you'll store shipping info on `orders` from BookCustomize.tsx.
+    # 2) Load order row (for future shipping info, title, etc.)
     order_row = (
         supabase.table("orders")
         .select("*")
@@ -173,37 +173,31 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
     )
     order_data = order_row.data or {}
 
-    # TODO: replace these with real columns once BookCustomize collects them
+    # TODO later: use real shipping info stored on this order
+    # For now: test address that matches Lulu's schema:
+    #   name, street1, city, state_code, country_code, postcode, phone_number
     shipping_address = {
-    "name": order_data.get("ship_name", "Bookify Test User"),
-    "street1": order_data.get("ship_line1", "123 Test St"),
-    "city": order_data.get("ship_city", "Durham"),
-    "state_code": order_data.get("ship_state", "NC"),
-    "country_code": order_data.get("ship_country", "US"),
-    "postcode": order_data.get("ship_postal", "27701"),
-    "phone_number": order_data.get("ship_phone", "+15555555555"),
+        "name": order_data.get("ship_name", "Bookify Test User"),
+        "street1": order_data.get("ship_line1", "123 Test St"),
+        "city": order_data.get("ship_city", "Durham"),
+        "state_code": order_data.get("ship_state", "NC"),
+        "country_code": order_data.get("ship_country", "US"),
+        "postcode": order_data.get("ship_postal", "27701"),
+        "phone_number": order_data.get("ship_phone", "+15555555555"),
     }
 
-
-    # 3) Build the Lulu Print-Job payload
-    #    See Lulu docs: POST /print-jobs/ with line_items, shipping_address,
-    #    shipping_option_level, contact_email, etc. :contentReference[oaicite:3]{index=3}
-
+    # 3) Build Lulu Print-Job payload
     payload = {
         "contact_email": LULU_CONTACT_EMAIL,
         "shipping_address": shipping_address,
-        "shipping_option_level": "MAIL",   # or PRIORITY_MAIL, GROUND, EXPEDITED, EXPRESS
+        "shipping_option_level": "MAIL",   # MAIL, PRIORITY_MAIL, GROUND, etc.
         "external_id": str(order_id),
-
         "line_items": [
             {
                 "pod_package_id": LULU_POD_PACKAGE_ID,
                 "quantity": 1,
                 "title": order_data.get("title", f"Bookify Order {order_id[:8]}"),
                 "printable_normalization": {
-                    # In a perfect world you'd provide separate interior + cover PDFs.
-                    # For MVP you can use the same PDF for both, or just interior
-                    # if your product/package allows it.
                     "cover": {
                         "source_url": public_url,
                     },
@@ -215,29 +209,41 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
         ],
     }
 
-    token = get_lulu_token()
+    try:
+        token = get_lulu_token()
+    except Exception as e:
+        print(f"❌ Failed to get Lulu token: {e}")
+        supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
+        return
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
     print("📦 Creating Lulu Print-Job...")
-    resp = requests.post(
-        f"{LULU_BASE_URL}/print-jobs/",
-        json=payload,
-        headers=headers,
-        timeout=30,
-    )
+    try:
+        resp = requests.post(
+            f"{LULU_BASE_URL}/print-jobs/",
+            json=payload,
+            headers=headers,
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"❌ Lulu print-job request failed: {e}")
+        supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
+        return
+
+    print(f"📨 Lulu response status: {resp.status_code}")
+    print(f"📨 Lulu response body: {resp.text}")
 
     if resp.status_code not in (200, 201):
         print(f"❌ Lulu print-job error {resp.status_code}: {resp.text}")
-        # optionally update orders.status = 'Print Error'
         supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
         return
 
     job = resp.json()
     print(f"✅ Lulu Print-Job created: {job.get('id')}")
-    # You may want to save Lulu's job ID:
     supabase.table("orders").update({
         "status": "Printing",
         "lulu_job_id": job.get("id")
