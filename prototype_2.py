@@ -247,10 +247,8 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
     job = resp.json()
     print(f"✅ Lulu Print-Job created: {job.get('id')}")
     supabase.table("orders").update({
-        "status": "Printing",
-        "lulu_job_id": job.get("id")
+        "status": "Printing"
     }).eq("id", order_id).execute()
-
 
 
 
