@@ -26,8 +26,10 @@ import requests
 from reportlab.pdfgen import canvas
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.pagesizes import letter, LETTER
+from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
 # -------------------------
@@ -72,11 +74,10 @@ app.add_middleware(
 )
 
 FFMPEG = ffmpeg.get_ffmpeg_exe()
-
-# In-memory results cache (ok for prototype; move to DB/Redis later)
-results: dict[str, dict] = {}
-
 DOMAIN = "https://speech-to-text-o5lh.onrender.com"
+
+# In-memory results cache (prototype)
+results: dict[str, dict] = {}
 
 
 # -------------------------
@@ -86,17 +87,12 @@ TRIM_W_IN = 4.25
 TRIM_H_IN = 6.875
 BLEED_IN = 0.125
 
-# Interior page size for Lulu trim
 LULU_INTERIOR_PAGE_SIZE = (TRIM_W_IN * inch, TRIM_H_IN * inch)
-
-# Cover spread for thin books (spine ~ 0 for very low page counts)
-# width = back + front + bleed left+right = 2*trim_w + 2*bleed (spine=0)
-# height = trim_h + 2*bleed
 LULU_COVER_SPREAD_SIZE = ((2 * TRIM_W_IN + 2 * BLEED_IN) * inch, (TRIM_H_IN + 2 * BLEED_IN) * inch)
 
 
 # -------------------------
-# Helpers
+# Auth / CORS preflight
 # -------------------------
 def verify_token(authorization: str = Header(None)) -> str:
     if not authorization or not authorization.startswith("Bearer "):
@@ -110,7 +106,6 @@ def verify_token(authorization: str = Header(None)) -> str:
             algorithms=["HS256"],
             options={"verify_aud": False},
         )
-        print("✅ TOKEN PAYLOAD:", payload)
         sub = payload.get("sub")
         if not sub:
             raise HTTPException(status_code=401, detail="Invalid token payload")
@@ -127,14 +122,69 @@ async def options_handler(full_path: str):
     return Response(status_code=200)
 
 
+# -------------------------
+# Fonts (EMBEDDED)
+# -------------------------
+def _try_register_font_pair(regular_path: str, bold_path: str, regular_name: str, bold_name: str) -> tuple[str, str]:
+    if os.path.exists(regular_path) and os.path.exists(bold_path):
+        if regular_name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(regular_name, regular_path))
+        if bold_name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+        return regular_name, bold_name
+    raise FileNotFoundError(f"Missing fonts: {regular_path}, {bold_path}")
+
+
+def register_embedded_fonts() -> tuple[str, str]:
+    """
+    Ensure we use embedded TTF fonts so Lulu doesn't reject PDFs.
+    Prefer bundled fonts (./fonts) if you add them to your repo,
+    otherwise try system fonts.
+    """
+    # 1) Bundled fonts (recommended)
+    bundled = [
+        ("./fonts/DejaVuSans.ttf", "./fonts/DejaVuSans-Bold.ttf", "BookifySans", "BookifySans-Bold"),
+        ("./fonts/DejaVuSerif.ttf", "./fonts/DejaVuSerif-Bold.ttf", "BookifySerif", "BookifySerif-Bold"),
+    ]
+    for reg, bold, reg_name, bold_name in bundled:
+        try:
+            return _try_register_font_pair(reg, bold, reg_name, bold_name)
+        except Exception:
+            pass
+
+    # 2) Common Linux paths
+    candidates = [
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  "BookifySans",  "BookifySans-Bold"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf", "BookifySerif", "BookifySerif-Bold"),
+        ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", "BookifySans", "BookifySans-Bold"),
+        ("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf", "BookifySerif", "BookifySerif-Bold"),
+    ]
+
+    last_err: Exception | None = None
+    for reg, bold, reg_name, bold_name in candidates:
+        try:
+            return _try_register_font_pair(reg, bold, reg_name, bold_name)
+        except Exception as e:
+            last_err = e
+
+    raise RuntimeError(
+        "No embeddable TTF fonts found. "
+        "Fix: add fonts into ./fonts (recommended) or ensure DejaVu/Liberation fonts exist on the server."
+    ) from last_err
+
+
+FONT_BODY, FONT_BOLD = register_embedded_fonts()
+
+
+# -------------------------
+# Audio helpers
+# -------------------------
 def _run_ffmpeg(cmd: list[str]) -> None:
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
 def compress_to_mp3(input_path: str) -> str:
-    """
-    Always re-encode to a clean MP3 Whisper can read.
-    """
+    """Always re-encode to a clean MP3 Whisper can read."""
     output_path = tempfile.mktemp(suffix=".mp3")
     _run_ffmpeg([
         FFMPEG, "-y",
@@ -148,18 +198,12 @@ def compress_to_mp3(input_path: str) -> str:
 
 
 def get_duration_seconds(file_path: str) -> float:
-    """
-    Use ffmpeg (not ffprobe) to avoid missing ffprobe in some environments.
-    Parses stderr output for "Duration:".
-    """
-    # This is a bit hacky but very reliable without ffprobe availability.
+    """Parse ffmpeg stderr for Duration (works even if ffprobe isn't installed)."""
     proc = subprocess.run([FFMPEG, "-i", file_path], capture_output=True, text=True)
     text = proc.stderr or ""
-    # Example: Duration: 00:01:23.45,
     import re
     m = re.search(r"Duration:\s+(\d+):(\d+):(\d+\.\d+)", text)
     if not m:
-        # if we can't read duration, just skip chunking
         return 0.0
     hh = float(m.group(1))
     mm = float(m.group(2))
@@ -170,7 +214,7 @@ def get_duration_seconds(file_path: str) -> float:
 def chunk_audio_mp3(file_path: str, chunk_size_mb: int = 10) -> list[str]:
     """
     Split a (clean) mp3 into multiple smaller mp3s.
-    IMPORTANT: re-encode each chunk; DO NOT '-acodec copy' (can produce invalid chunks).
+    IMPORTANT: re-encode each chunk; DO NOT '-acodec copy'.
     """
     size = os.path.getsize(file_path)
     if size <= chunk_size_mb * 1024 * 1024:
@@ -178,11 +222,10 @@ def chunk_audio_mp3(file_path: str, chunk_size_mb: int = 10) -> list[str]:
 
     dur = get_duration_seconds(file_path)
     if dur <= 0:
-        # If duration couldn't be read, just return original and let Whisper try.
         return [file_path]
 
     n_parts = int(size // (chunk_size_mb * 1024 * 1024)) + 1
-    part_dur = max(30.0, dur / n_parts)  # keep chunks sane
+    part_dur = max(30.0, dur / n_parts)
 
     chunk_paths: list[str] = []
     for i in range(n_parts):
@@ -199,21 +242,27 @@ def chunk_audio_mp3(file_path: str, chunk_size_mb: int = 10) -> list[str]:
             "-b:a", "64k",
             part_path,
         ])
-        # Ensure not empty
         if os.path.exists(part_path) and os.path.getsize(part_path) > 0:
             chunk_paths.append(part_path)
 
-    # Fallback: if something went wrong, use the original
     return chunk_paths or [file_path]
 
 
+# -------------------------
+# PDF generation (INTERIOR + COVER)
+# -------------------------
 def make_interior_pdf(chapter_text: str, user_name: str = "User") -> str:
-    """
-    Interior PDF must match Lulu trim size.
-    """
+    """Interior PDF must match Lulu trim size; fonts must be embedded."""
     styles = getSampleStyleSheet()
-    pdf_path = tempfile.mktemp(suffix=".pdf")
+    styles["Normal"].fontName = FONT_BODY
+    styles["Normal"].fontSize = 11
+    styles["Normal"].leading = 14
 
+    styles["Title"].fontName = FONT_BOLD
+    styles["Title"].fontSize = 18
+    styles["Title"].leading = 22
+
+    pdf_path = tempfile.mktemp(suffix=".pdf")
     doc = SimpleDocTemplate(
         pdf_path,
         pagesize=LULU_INTERIOR_PAGE_SIZE,
@@ -223,9 +272,10 @@ def make_interior_pdf(chapter_text: str, user_name: str = "User") -> str:
         bottomMargin=0.5 * inch,
     )
 
-    story = []
-    story.append(Paragraph(f"<b>{user_name}'s Book</b>", styles["Title"]))
-    story.append(Spacer(1, 0.2 * inch))
+    story = [
+        Paragraph(f"{user_name}'s Book", styles["Title"]),
+        Spacer(1, 0.2 * inch),
+    ]
 
     for paragraph in chapter_text.split("\n\n"):
         p = paragraph.strip()
@@ -240,53 +290,50 @@ def make_interior_pdf(chapter_text: str, user_name: str = "User") -> str:
 
 def make_cover_pdf(title: str, author: str) -> str:
     """
-    Generate a simple full-spread cover PDF at Lulu cover spread size
-    (back + front + bleed, spine assumed ~0 for thin books).
+    Full-spread cover PDF at Lulu cover spread size.
+    IMPORTANT: use embedded TTF fonts (not Helvetica) to satisfy Lulu.
     """
     pdf_path = tempfile.mktemp(suffix="_cover.pdf")
     w, h = LULU_COVER_SPREAD_SIZE
     c = canvas.Canvas(pdf_path, pagesize=(w, h))
 
-    # Background (white) - you can change later
+    # Background
     c.setFillColorRGB(1, 1, 1)
     c.rect(0, 0, w, h, fill=1, stroke=0)
 
-    # Compute front cover area: right half excluding bleed margins
-    # Front trim starts at (w/2 + BLEED) when spine=0
-    bleed = BLEED_IN * inch
+    # Front cover center (spine assumed ~0)
     front_x0 = (w / 2.0)
     front_center_x = front_x0 + (TRIM_W_IN * inch) / 2.0
     front_center_y = h / 2.0
 
-    # Title/author
     c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica-Bold", 24)
+
+    c.setFont(FONT_BOLD, 24)
     c.drawCentredString(front_center_x, front_center_y + 40, title[:60])
 
-    c.setFont("Helvetica", 14)
+    c.setFont(FONT_BODY, 14)
     c.drawCentredString(front_center_x, front_center_y, f"by {author}"[:80])
 
-    # Optional: small spine text if you later compute spine
     c.save()
     return pdf_path
 
 
+# -------------------------
+# Lulu helpers
+# -------------------------
 def get_lulu_token() -> str:
     if not LULU_CLIENT_KEY or not LULU_CLIENT_SECRET:
         raise RuntimeError("Missing LULU_CLIENT_KEY/LULU_CLIENT_SECRET")
 
     token_url = f"{LULU_BASE_URL}/auth/realms/glasstree/protocol/openid-connect/token"
-    data = {"grant_type": "client_credentials"}
-
     resp = requests.post(
         token_url,
-        data=data,
+        data={"grant_type": "client_credentials"},
         auth=(LULU_CLIENT_KEY, LULU_CLIENT_SECRET),
         timeout=20,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"Lulu token error {resp.status_code}: {resp.text}")
-
     return resp.json()["access_token"]
 
 
@@ -307,9 +354,7 @@ def supabase_public_url(bucket: str, path: str) -> str:
 
 
 def send_to_printer(interior_storage_path: str, cover_storage_path: str, user_id: str, order_id: str):
-    """
-    Requires BOTH interior + cover PDFs.
-    """
+    """Requires BOTH interior + cover PDFs."""
     try:
         interior_url = supabase_public_url("book_files", interior_storage_path)
         cover_url = supabase_public_url("book_files", cover_storage_path)
@@ -318,16 +363,7 @@ def send_to_printer(interior_storage_path: str, cover_storage_path: str, user_id
         supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
         return
 
-    print(f"🌐 Lulu will fetch interior PDF from {interior_url}")
-    print(f"🌐 Lulu will fetch cover PDF from {cover_url}")
-
-    order_row = (
-        supabase.table("orders")
-        .select("*")
-        .eq("id", order_id)
-        .single()
-        .execute()
-    )
+    order_row = supabase.table("orders").select("*").eq("id", order_id).single().execute()
     order_data = order_row.data or {}
 
     shipping_address = {
@@ -364,44 +400,29 @@ def send_to_printer(interior_storage_path: str, cover_storage_path: str, user_id
 
     try:
         token = get_lulu_token()
-    except Exception as e:
-        print(f"❌ Failed to get Lulu token: {e}")
-        supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
-        return
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    print("📦 Creating Lulu Print-Job...")
-    try:
         resp = requests.post(
             f"{LULU_BASE_URL}/print-jobs/",
             json=payload,
-            headers=headers,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=30,
         )
+        print(f"📨 Lulu response status: {resp.status_code}")
+        print(f"📨 Lulu response body: {resp.text}")
+
+        if resp.status_code not in (200, 201):
+            supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
+            return
+
+        job = resp.json()
+        lulu_job_id = job.get("id")
+        supabase.table("orders").update({
+            "status": "Printing",
+            "lulu_job_id": str(lulu_job_id) if lulu_job_id else None,
+        }).eq("id", order_id).execute()
+
     except Exception as e:
-        print(f"❌ Lulu print-job request failed: {e}")
+        print(f"❌ Lulu print-job failed: {e}")
         supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
-        return
-
-    print(f"📨 Lulu response status: {resp.status_code}")
-    print(f"📨 Lulu response body: {resp.text}")
-
-    if resp.status_code not in (200, 201):
-        supabase.table("orders").update({"status": "Print Error"}).eq("id", order_id).execute()
-        return
-
-    job = resp.json()
-    lulu_job_id = job.get("id")
-
-    print(f"✅ Lulu Print-Job created: {lulu_job_id}")
-    supabase.table("orders").update({
-        "status": "Printing",
-        "lulu_job_id": str(lulu_job_id) if lulu_job_id else None,
-    }).eq("id", order_id).execute()
 
 
 # -------------------------
@@ -414,36 +435,24 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
     cover_pdf_path = None
 
     try:
-        # Always convert to clean mp3 first (input could be webm/m4a/etc)
         compressed_path = compress_to_mp3(temp_path)
-
-        # Chunk safely (re-encode chunks)
         chunks = chunk_audio_mp3(compressed_path)
+
         transcripts: list[str] = []
-
-        for i, path in enumerate(chunks):
+        for path in chunks:
             with open(path, "rb") as audio_file:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                )
+                transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
             transcripts.append(transcript.text)
-
-            # Remove chunk if it’s not the original compressed file
             if path != compressed_path and os.path.exists(path):
                 os.remove(path)
 
         full_text = "\n".join(transcripts)
 
-        # Clean up original temp files for paid runs
         if has_paid:
             for p in [temp_path, compressed_path]:
                 if p and os.path.exists(p):
                     os.remove(p)
-        else:
-            print(f"⏸ Keeping temp file for preview {upload_id} to allow reprocess later.")
 
-        # GPT chaptering
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -452,24 +461,16 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
                     "content": (
                         "You are an experienced editor and storyteller who transforms a long-form spoken transcript "
                         "into a structured book-style narrative divided into chapters. "
-                        "Each chapter should cover a substantial portion of the conversation—typically several related ideas or stories—"
-                        "not just short topic shifts. "
-                        "Aim for rich, continuous prose with detailed paragraphs that flow naturally. "
-                        "The number of chapters should depend on the transcript length: fewer chapters for short transcripts, "
-                        "and more chapters for longer ones. "
-                        "Each chapter must include a clear, engaging title and multiple detailed paragraphs (typically 5–12) "
-                        "that capture the key moments, transitions, and emotions of that section. "
-                        "Please write with natural transitions, avoiding repetitive introductions like 'In this section...' "
-                        "and instead use smooth storytelling flow."
+                        "Each chapter should cover a substantial portion of the conversation. "
+                        "Use rich prose with smooth transitions. "
+                        "Each chapter must include a clear title and multiple detailed paragraphs."
                     ),
                 },
                 {"role": "user", "content": f"Divide this transcript into chapters:\n\n{full_text}"},
             ],
             max_tokens=4000,
         )
-
         chapters_text = completion.choices[0].message.content.strip()
-        print(f"✅ Whisper + GPT done for upload_id={upload_id}, has_paid={has_paid}")
 
         if not has_paid:
             preview_lines = chapters_text.splitlines()[:20]
@@ -477,18 +478,11 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             results[upload_id] = {"status": "done", "chapters": preview_text, "is_preview": True}
             return
 
-        # Paid result
         results[upload_id] = {"status": "done", "chapters": chapters_text, "is_preview": False}
 
-        # Create interior PDF (correct trim)
         interior_pdf_path = make_interior_pdf(chapters_text, user_id)
-        print(f"✅ Created interior PDF at {interior_pdf_path}")
-
-        # Create cover PDF (correct spread size)
         cover_pdf_path = make_cover_pdf(title=f"Bookify Session {upload_id[:8]}", author=user_id)
-        print(f"✅ Created cover PDF at {cover_pdf_path}")
 
-        # Upload PDFs
         interior_storage_path = f"books/{user_id}/{upload_id}.pdf"
         cover_storage_path = f"books/{user_id}/{upload_id}_cover.pdf"
 
@@ -497,10 +491,6 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
         with open(cover_pdf_path, "rb") as f:
             supabase.storage.from_("book_files").upload(cover_storage_path, f)
 
-        print(f"✅ Uploaded interior PDF to Supabase: {interior_storage_path}")
-        print(f"✅ Uploaded cover PDF to Supabase: {cover_storage_path}")
-
-        # Save to user_books
         book_insert = supabase.table("user_books").insert({
             "user_id": user_id,
             "title": f"Session {upload_id[:8]}",
@@ -509,35 +499,18 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
         }).execute()
 
         book_id = book_insert.data[0]["id"] if book_insert.data else None
-        if book_id:
-            print(f"✅ Saved book {book_id} for user {user_id}")
 
-        # Link to order + print if ready
         if order_id and book_id:
             supabase.table("orders").update({"book_id": book_id}).eq("id", order_id).execute()
-            print(f"✅ Linked book {book_id} → order {order_id}")
 
-            order_data = (
-                supabase.table("orders")
-                .select("type, shipping_submitted")
-                .eq("id", order_id)
-                .single()
-                .execute()
-            )
-
-            if order_data.data and order_data.data.get("type") == "book":
-                if order_data.data.get("shipping_submitted"):
-                    print("🚀 Shipping already submitted — sending to Lulu now...")
+            order_row = supabase.table("orders").select("type, shipping_submitted").eq("id", order_id).single().execute()
+            if order_row.data and order_row.data.get("type") == "book":
+                if order_row.data.get("shipping_submitted"):
                     send_to_printer(interior_storage_path, cover_storage_path, user_id, order_id)
                 else:
                     print("⏸ Book ready, waiting for user to submit shipping details.")
 
-        # Mark upload complete
-        try:
-            supabase.table("upload_sessions").update({"status": "complete"}).eq("id", upload_id).execute()
-            print(f"🏁 upload_sessions status updated to 'complete' for {upload_id}")
-        except Exception as e:
-            print(f"⚠️ Failed to update upload_sessions status for {upload_id}: {e}")
+        supabase.table("upload_sessions").update({"status": "complete"}).eq("id", upload_id).execute()
 
     except Exception as e:
         import traceback
@@ -546,7 +519,6 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
         print("❌ Error in process_audio:", e)
 
     finally:
-        # local temp cleanup
         for p in [interior_pdf_path, cover_pdf_path]:
             if p and os.path.exists(p):
                 try:
@@ -559,14 +531,10 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
 # Routes
 # -------------------------
 @app.post("/upload/")
-async def upload_audio(
-    file: UploadFile = File(...),
-    authorization: str = Header(None),
-):
+async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
     user_id = verify_token(authorization)
     upload_id = str(uuid.uuid4())
 
-    # Keep original extension if present; otherwise .bin
     suffix = ""
     if file.filename and "." in file.filename:
         suffix = "." + file.filename.split(".")[-1].lower()
@@ -577,12 +545,9 @@ async def upload_audio(
         temp_audio.write(await file.read())
         temp_path = temp_audio.name
 
-    # Save raw upload
     storage_audio_path = f"uploads/{user_id}/{upload_id}{suffix}"
     with open(temp_path, "rb") as f:
         supabase.storage.from_("raw_audio").upload(storage_audio_path, f)
-
-    print(f"✅ Uploaded raw audio to Supabase: {storage_audio_path}")
 
     supabase.table("upload_sessions").insert({
         "id": upload_id,
@@ -593,12 +558,7 @@ async def upload_audio(
 
     results[upload_id] = {"status": "processing", "paid": False}
 
-    threading.Thread(
-        target=process_audio,
-        args=(upload_id, temp_path, user_id, False),
-        daemon=True,
-    ).start()
-
+    threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id, False), daemon=True).start()
     return {"id": upload_id, "status": "processing"}
 
 
@@ -639,75 +599,12 @@ async def create_checkout_session(request: Request):
             "title": "Bookify Order",
         },
     )
-
     return {"url": session.url}
-
-
-@app.get("/download/{order_id}")
-async def download_order_pdf(order_id: str, authorization: str = Header(None)):
-    user_id = verify_token(authorization)
-    print(f"✅ Authenticated PDF download for user {user_id}, order {order_id}")
-
-    order_res = (
-        supabase.table("orders")
-        .select("book_id")
-        .eq("id", order_id)
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-
-    book_id = order_res.data[0]["book_id"] if (order_res.data and order_res.data[0].get("book_id")) else None
-    if not book_id:
-        raise HTTPException(status_code=404, detail="No book linked to this order.")
-
-    book_res = (
-        supabase.table("user_books")
-        .select("content")
-        .eq("id", book_id)
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    if not book_res.data:
-        raise HTTPException(status_code=404, detail="Book not found for this order.")
-
-    book_text = book_res.data[0]["content"]
-
-    buffer = io.BytesIO()
-    p = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
-
-    textobject = p.beginText()
-    textobject.setTextOrigin(inch, height - inch)
-    textobject.setFont("Helvetica", 12)
-
-    for paragraph in book_text.split("\n"):
-        for line in wrap(paragraph, 90):
-            textobject.textLine(line)
-        textobject.textLine("")
-        if textobject.getY() <= inch:
-            p.drawText(textobject)
-            p.showPage()
-            textobject = p.beginText()
-            textobject.setTextOrigin(inch, height - inch)
-            textobject.setFont("Helvetica", 12)
-
-    p.drawText(textobject)
-    p.save()
-    buffer.seek(0)
-
-    headers = {"Content-Disposition": "attachment; filename=Bookify.pdf"}
-    return StreamingResponse(buffer, headers=headers, media_type="application/pdf")
 
 
 @app.post("/submit-shipping")
 async def submit_shipping(request: Request, user_id: str = Depends(verify_token)):
-    try:
-        data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
-
+    data = await request.json()
     order_id = data.get("order_id")
     shipping = data.get("shipping", {})
 
@@ -743,38 +640,18 @@ async def submit_shipping(request: Request, user_id: str = Depends(verify_token)
         "shipping_submitted": True,
     }).eq("id", order_id).execute()
 
-    print(f"✅ Shipping details saved for order {order_id}")
-
     # If book already exists, print now
     order_data = order_res.data
     if order_data.get("type") == "book" and order_data.get("book_id"):
-        book_res = (
-            supabase.table("user_books")
-            .select("pdf_path")
-            .eq("id", order_data["book_id"])
-            .single()
-            .execute()
-        )
-
+        book_res = supabase.table("user_books").select("pdf_path").eq("id", order_data["book_id"]).single().execute()
         if book_res.data and book_res.data.get("pdf_path"):
             interior_path = book_res.data["pdf_path"]
             cover_path = interior_path.replace(".pdf", "_cover.pdf")
-
-            # If cover is missing (older books), we can’t print yet
-            # (you can regenerate later, but for now just fail gracefully)
             try:
-                # verify cover exists by trying to make URL
                 _ = supabase_public_url("book_files", cover_path)
-                print(f"🚀 Shipping submitted — sending order {order_id} to printer")
-                threading.Thread(
-                    target=send_to_printer,
-                    args=(interior_path, cover_path, user_id, order_id),
-                    daemon=True,
-                ).start()
+                threading.Thread(target=send_to_printer, args=(interior_path, cover_path, user_id, order_id), daemon=True).start()
             except Exception:
-                print("⏸ Shipping saved, but cover PDF not ready/available yet.")
-        else:
-            print("⏸ Shipping saved, but PDFs not ready yet (will print after generation).")
+                print("⏸ Shipping saved, but cover PDF not available yet.")
 
     return {"status": "ok"}
 
@@ -795,10 +672,8 @@ async def order_from_session(session_id: str, user_id: str = Depends(verify_toke
         .limit(1)
         .execute()
     )
-
     if not res.data:
         raise HTTPException(status_code=404, detail="Order not found for this session (may still be processing).")
-
     return {"order_id": res.data[0]["id"]}
 
 
@@ -811,7 +686,6 @@ async def stripe_webhook(request: Request):
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
     except Exception as e:
-        print("❌ Stripe webhook verification failed:", e)
         return JSONResponse(status_code=400, content={"error": str(e)})
 
     if event["type"] == "checkout.session.completed":
@@ -823,12 +697,7 @@ async def stripe_webhook(request: Request):
         order_type = meta.get("order_type") or "pdf"
         title = meta.get("title") or "Bookify Order"
 
-        if not user_id or not upload_id:
-            print("⚠️ Missing user_id or upload_id in Stripe metadata")
-            return JSONResponse(status_code=200, content={"status": "missing fields"})
-
         status_order = "Complete" if order_type == "pdf" else "Processing"
-
         order_insert = supabase.table("orders").insert({
             "user_id": user_id,
             "title": title,
@@ -836,50 +705,24 @@ async def stripe_webhook(request: Request):
             "status": status_order,
             "stripe_session_id": stripe_session_id,
         }).execute()
-
         order_id = order_insert.data[0]["id"] if order_insert.data else None
-        print(f"✅ Payment confirmed for upload {upload_id} (user {user_id}) → order {order_id}")
 
-        upload_row = (
-            supabase.table("upload_sessions")
-            .select("audio_path")
-            .eq("id", upload_id)
-            .single()
-            .execute()
-        )
+        upload_row = supabase.table("upload_sessions").select("audio_path").eq("id", upload_id).single().execute()
         audio_path = upload_row.data["audio_path"] if upload_row.data else None
         if not audio_path:
-            print(f"⚠️ No audio_path found in upload_sessions for {upload_id}")
             return JSONResponse(status_code=200, content={"status": "missing audio_path"})
 
-        print(f"🔁 Reprocessing {upload_id} from Supabase storage: {audio_path}")
+        file_data = supabase.storage.from_("raw_audio").download(audio_path)
+        suffix = os.path.splitext(audio_path)[1] or ".bin"
+        temp_path = tempfile.mktemp(suffix=suffix)
+        with open(temp_path, "wb") as f:
+            f.write(getattr(file_data, "content", file_data))
 
-        try:
-            file_data = supabase.storage.from_("raw_audio").download(audio_path)
-            # Preserve extension if possible
-            suffix = os.path.splitext(audio_path)[1] or ".bin"
-            temp_path = tempfile.mktemp(suffix=suffix)
-
-            with open(temp_path, "wb") as f:
-                f.write(getattr(file_data, "content", file_data))
-
-            print(f"✅ Downloaded raw audio to {temp_path}")
-
-            threading.Thread(
-                target=process_audio,
-                args=(upload_id, temp_path, user_id, True, order_id),
-                daemon=True,
-            ).start()
-
-            supabase.table("upload_sessions").update({"status": "processing"}).eq("id", upload_id).execute()
-
-        except Exception as e:
-            print(f"❌ Error reprocessing {upload_id} from Supabase:", e)
-            return JSONResponse(status_code=500, content={"error": str(e)})
+        threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id, True, order_id), daemon=True).start()
+        supabase.table("upload_sessions").update({"status": "processing"}).eq("id", upload_id).execute()
 
     return JSONResponse(status_code=200, content={"status": "success"})
 
 
-# optional: serve frontend if bundled
 if os.path.exists("static/dist"):
     app.mount("/", StaticFiles(directory="static/dist", html=True), name="static")
