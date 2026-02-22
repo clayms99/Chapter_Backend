@@ -630,7 +630,10 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
 
 @app.post("/submit-shipping")
 async def submit_shipping(request: Request, user_id: str = Depends(verify_token)):
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
     order_id = data.get("order_id")
     shipping = data.get("shipping", {})
 
