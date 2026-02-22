@@ -118,13 +118,15 @@ def chunk_audio(file_path: str, chunk_size_mb=10) -> list[str]:
 
     return chunk_paths
 
+LULU_PAGE_SIZE = (4.25 * inch, 6.87 * inch)
+
 def make_book_pdf(chapter_text: str, user_name: str = "User") -> str:
     """Generate a clean multi-page PDF from the chapter text."""
     styles = getSampleStyleSheet()
     pdf_path = tempfile.mktemp(suffix=".pdf")
-    doc = SimpleDocTemplate(pdf_path, pagesize=LETTER,
-                            rightMargin=inch, leftMargin=inch,
-                            topMargin=inch, bottomMargin=inch)
+    doc = SimpleDocTemplate(pdf_path, pagesize=LULU_PAGE_SIZE,
+                            rightMargin=0.5 * inch, leftMargin=0.5 * inch,
+                            topMargin=0.5 * inch, bottomMargin=0.5 * inch)
     story = []
     story.append(Paragraph(f"<b>{user_name}'s Book</b>", styles["Title"]))
     story.append(Spacer(1, 0.25 * inch))
