@@ -163,7 +163,7 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
 
     print(f"🌐 Lulu will fetch interior PDF from {public_url}")
 
-    # 2) Load order row (for future shipping info, title, etc.)
+    # 2) Load order row for shipping info, title, etc.
     order_row = (
         supabase.table("orders")
         .select("*")
@@ -173,9 +173,7 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
     )
     order_data = order_row.data or {}
 
-    # TODO later: use real shipping info stored on this order
-    # For now: test address that matches Lulu's schema:
-    #   name, street1, city, state_code, country_code, postcode, phone_number
+    # Use real shipping info stored on this order (populated via /submit-shipping)
     shipping_address = {
         "name": order_data.get("ship_name", "Bookify Test User"),
         "street1": order_data.get("ship_line1", "123 Test St"),
@@ -185,6 +183,10 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
         "postcode": order_data.get("ship_postal", "27701"),
         "phone_number": order_data.get("ship_phone", "+15555555555"),
     }
+    if order_data.get("ship_line2"):
+        shipping_address["street2"] = order_data["ship_line2"]
+    if order_data.get("ship_email"):
+        shipping_address["email"] = order_data["ship_email"]
 
     # 3) Build Lulu Print-Job payload
     payload = {
@@ -245,9 +247,11 @@ def send_to_printer(storage_path: str, user_id: str, order_id: str):
         return
 
     job = resp.json()
-    print(f"✅ Lulu Print-Job created: {job.get('id')}")
+    lulu_job_id = job.get("id")
+    print(f"✅ Lulu Print-Job created: {lulu_job_id}")
     supabase.table("orders").update({
-        "status": "Printing"
+        "status": "Printing",
+        "lulu_job_id": str(lulu_job_id) if lulu_job_id else None,
     }).eq("id", order_id).execute()
 
 
@@ -361,12 +365,14 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             supabase.table("orders").update({"book_id": book_id}).eq("id", order_id).execute()
             print(f"✅ Linked book {book_id} → order {order_id}")
 
-            # If this order was a “book” purchase, send to printer
-            order_data = supabase.table("orders").select("type").eq("id", order_id).single().execute()
+            # If this order was a “book” purchase, send to printer only if shipping is submitted
+            order_data = supabase.table("orders").select("type, shipping_submitted").eq("id", order_id).single().execute()
             if order_data.data and order_data.data["type"] == "book":
-                print("🚀 Sending book to printer API...")
-                # Pass storage path (in your bucket), not local /tmp path
-                send_to_printer(storage_path, user_id, order_id)
+                if order_data.data.get("shipping_submitted"):
+                    print("🚀 Shipping already submitted — sending book to printer API...")
+                    send_to_printer(storage_path, user_id, order_id)
+                else:
+                    print("⏸ Book ready, waiting for user to submit shipping details.")
 
 
         # --- 🏁 Mark upload as fully complete in DB ---
@@ -620,6 +626,69 @@ async def download_order_pdf(order_id: str, authorization: str = Header(None)):
 
     headers = {"Content-Disposition": "attachment; filename=Bookify.pdf"}
     return StreamingResponse(buffer, headers=headers, media_type="application/pdf")
+
+
+@app.post("/submit-shipping")
+async def submit_shipping(request: Request, user_id: str = Depends(verify_token)):
+    data = await request.json()
+    order_id = data.get("order_id")
+    shipping = data.get("shipping", {})
+
+    if not order_id:
+        raise HTTPException(status_code=400, detail="Missing order_id")
+
+    required = ["name", "street1", "city", "state_code", "country_code", "postcode"]
+    for field in required:
+        if not shipping.get(field):
+            raise HTTPException(status_code=400, detail=f"Missing required shipping field: {field}")
+
+    # Verify the order belongs to this user
+    order_res = (
+        supabase.table("orders")
+        .select("*")
+        .eq("id", order_id)
+        .eq("user_id", user_id)
+        .single()
+        .execute()
+    )
+    if not order_res.data:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Update the order with shipping details
+    supabase.table("orders").update({
+        "ship_name": shipping.get("name", ""),
+        "ship_email": shipping.get("email", ""),
+        "ship_phone": shipping.get("phone_number", ""),
+        "ship_line1": shipping.get("street1", ""),
+        "ship_line2": shipping.get("street2", ""),
+        "ship_city": shipping.get("city", ""),
+        "ship_state": shipping.get("state_code", ""),
+        "ship_country": shipping.get("country_code", ""),
+        "ship_postal": shipping.get("postcode", ""),
+        "shipping_submitted": True,
+    }).eq("id", order_id).execute()
+
+    print(f"✅ Shipping details saved for order {order_id}")
+
+    # If the book is already generated, trigger printing
+    order_data = order_res.data
+    if order_data.get("type") == "book" and order_data.get("book_id"):
+        book_res = (
+            supabase.table("user_books")
+            .select("pdf_path")
+            .eq("id", order_data["book_id"])
+            .single()
+            .execute()
+        )
+        if book_res.data and book_res.data.get("pdf_path"):
+            print(f"🚀 Shipping submitted — sending order {order_id} to printer")
+            threading.Thread(
+                target=send_to_printer,
+                args=(book_res.data["pdf_path"], user_id, order_id),
+                daemon=False,
+            ).start()
+
+    return {"status": "ok"}
 
 
 @app.get("/orders/{user_id}")
