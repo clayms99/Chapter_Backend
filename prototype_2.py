@@ -699,6 +699,20 @@ async def get_orders(user_id: str):
     res = supabase.table("orders").select("*").eq("user_id", user_id).execute()
     return res.data
 
+@app.get("/order-from-session")
+async def order_from_session(session_id: str, user_id: str = Depends(verify_token)):
+    res = (
+        supabase.table("orders")
+        .select("id")
+        .eq("stripe_session_id", session_id)
+        .eq("user_id", user_id)
+        .single()
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Order not found for this session")
+    return {"order_id": res.data["id"]}
+
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
     """Handles Stripe webhook events to confirm payment and trigger full book generation."""
@@ -714,6 +728,7 @@ async def stripe_webhook(request: Request):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
+        stripe_session_id = session.get("id")
         meta = session.get("metadata", {})
         user_id = meta.get("user_id")
         upload_id = meta.get("upload_id")
@@ -730,7 +745,8 @@ async def stripe_webhook(request: Request):
             "user_id": user_id,
             "title": title,
             "type": order_type,
-            "status": status_order
+            "status": status_order,
+            "stripe_session_id": stripe_session_id,
         }).execute()
 
         order_id = order_insert.data[0]["id"] if order_insert.data else None
