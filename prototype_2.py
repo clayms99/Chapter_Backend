@@ -706,12 +706,15 @@ async def order_from_session(session_id: str, user_id: str = Depends(verify_toke
         .select("id")
         .eq("stripe_session_id", session_id)
         .eq("user_id", user_id)
-        .single()
+        .limit(1)
         .execute()
     )
+
     if not res.data:
-        raise HTTPException(status_code=404, detail="Order not found for this session")
-    return {"order_id": res.data["id"]}
+        # return 404 instead of raising PGRST116
+        raise HTTPException(status_code=404, detail="Order not found for this session (may still be processing).")
+
+    return {"order_id": res.data[0]["id"]}data["id"]}
 
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
