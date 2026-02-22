@@ -481,7 +481,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
         results[upload_id] = {"status": "done", "chapters": chapters_text, "is_preview": False}
 
         interior_pdf_path = make_interior_pdf(chapters_text, user_id)
-        cover_pdf_path = make_cover_pdf(title=f"Bookify Session {upload_id[:8]}", author=user_id)
+        cover_pdf_path = make_cover_pdf(title="Bookify Session", author=user_id)
 
         interior_storage_path = f"books/{user_id}/{upload_id}.pdf"
         cover_storage_path = f"books/{user_id}/{upload_id}_cover.pdf"
