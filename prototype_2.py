@@ -76,7 +76,7 @@ app.add_middleware(
 )
 
 FFMPEG = ffmpeg.get_ffmpeg_exe()
-DOMAIN = "https://booksly.co"
+DOMAIN = "https://www.booksly.co"
 
 # In-memory results cache (prototype)
 results: dict[str, dict] = {}
