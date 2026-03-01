@@ -67,6 +67,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://speech-to-text-o5lh.onrender.com",
+        "https://booksly.co",
+        "https://www.booksly.co",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -74,7 +76,7 @@ app.add_middleware(
 )
 
 FFMPEG = ffmpeg.get_ffmpeg_exe()
-DOMAIN = "https://speech-to-text-o5lh.onrender.com"
+DOMAIN = "https://booksly.co"
 
 # In-memory results cache (prototype)
 results: dict[str, dict] = {}
