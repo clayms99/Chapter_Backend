@@ -1,0 +1,54 @@
+graph TD
+    A["📤 User Uploads Audio"] -->|POST /upload/| B["Verify Token"]
+    B --> C["Create Upload Session<br/>in Supabase"]
+    C --> D["Store Raw Audio<br/>in Storage"]
+    D --> E["Start Background<br/>process_audio Thread"]
+    
+    E --> F["Compress to MP3"]
+    F --> G["Chunk Audio<br/>if size > 10MB"]
+    G --> H["Transcribe Chunks<br/>with Whisper API"]
+    H --> I["Combine Transcripts"]
+    
+    I --> J{User Paid?}
+    J -->|No| K["Return Preview<br/>20 lines max"]
+    K --> L["Cache Result"]
+    
+    J -->|Yes| M["Delete Temp Files"]
+    M --> N["Call GPT-4 to Create<br/>Structured Chapters"]
+    N --> O["Generate Interior PDF<br/>with Embedded Fonts"]
+    O --> P["Generate Cover PDF"]
+    P --> Q["Upload PDFs to<br/>Supabase Storage"]
+    Q --> R["Create user_books<br/>Record"]
+    R --> L
+    
+    S["💳 Stripe Payment Flow"] -->|POST /create-checkout| T["Create Checkout<br/>Session"]
+    T --> U["Return Session URL"]
+    U --> V["User Completes<br/>Payment"]
+    V --> W["Stripe Webhook:<br/>checkout.session.completed"]
+    W --> X["Create Order Record<br/>in Supabase"]
+    X --> Y["Download Audio File<br/>from Storage"]
+    Y --> Z["Call process_audio<br/>with has_paid=True"]
+    Z --> N
+    
+    AA["📬 Shipping & Printing"] -->|POST /submit-shipping| AB["Verify Token"]
+    AB --> AC["Validate Shipping<br/>Fields"]
+    AC --> AD["Save Shipping Address<br/>to Order"]
+    AD --> AE{Book<br/>Exists?}
+    AE -->|Yes| AF["Send to Printer<br/>send_to_printer Thread"]
+    AE -->|No| AG["Wait for Book<br/>Generation"]
+    
+    AF --> AH["Get Lulu Token"]
+    AH --> AI["Prepare Print Job<br/>Payload"]
+    AI --> AJ["Send to Lulu API"]
+    AJ --> AK["Update Order Status<br/>to Printing"]
+    
+    AL["🔍 Query Endpoints"] -->|GET /result/upload_id| AM["Return Cached<br/>Result"]
+    AL -->|GET /orders/user_id| AN["Get All Orders<br/>for User"]
+    AL -->|GET /order-from-session| AO["Find Order by<br/>Stripe Session ID"]
+    
+    style A fill:#e1f5ff
+    style S fill:#fff3e0
+    style AA fill:#f3e5f5
+    style AL fill:#e8f5e9
+    style K fill:#ffebee
+    style AK fill:#c8e6c9
