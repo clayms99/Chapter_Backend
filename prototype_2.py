@@ -332,7 +332,7 @@ def get_lulu_token() -> str:
         token_url,
         data={"grant_type": "client_credentials"},
         auth=(LULU_CLIENT_KEY, LULU_CLIENT_SECRET),
-        timeout=20,
+        timeout=60,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"Lulu token error {resp.status_code}: {resp.text}")
@@ -406,7 +406,7 @@ def send_to_printer(interior_storage_path: str, cover_storage_path: str, user_id
             f"{LULU_BASE_URL}/print-jobs/",
             json=payload,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            timeout=30,
+            timeout=60,
         )
         print(f"📨 Lulu response status: {resp.status_code}")
         print(f"📨 Lulu response body: {resp.text}")
