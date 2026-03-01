@@ -679,6 +679,88 @@ async def order_from_session(session_id: str, user_id: str = Depends(verify_toke
     return {"order_id": res.data[0]["id"]}
 
 
+
+@app.get("/download-latest-pdf")
+def download_latest_pdf(user_id: str = Depends(verify_token)):
+    # Find latest book row for user (must include pdf_path)
+    res = (
+        supabase.table("user_books")
+        .select("pdf_path, created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    if not res.data:
+        raise HTTPException(status_code=404, detail="No book found for this user.")
+    pdf_path = res.data[0].get("pdf_path")
+    if not pdf_path:
+        raise HTTPException(status_code=404, detail="No PDF available for this user.")
+
+    # Download the PDF bytes from Supabase Storage
+    file_data = supabase.storage.from_("book_files").download(pdf_path)
+    pdf_bytes = getattr(file_data, "content", file_data)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="SpeechToBook.pdf"'},
+    )
+
+@app.get("/download/{order_id}")
+def download_order_pdf(order_id: str, user_id: str = Depends(verify_token)):
+    # Find book_id for this order
+    order_res = (
+        supabase.table("orders")
+        .select("book_id")
+        .eq("id", order_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+
+    book_id = None
+    if order_res.data:
+        book_id = order_res.data[0].get("book_id")
+
+    # Fallback: latest book if order not linked yet
+    if not book_id:
+        latest = (
+            supabase.table("user_books")
+            .select("id")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if latest.data:
+            book_id = latest.data[0]["id"]
+
+    if not book_id:
+        raise HTTPException(status_code=404, detail="No book available for this order.")
+
+    book_res = (
+        supabase.table("user_books")
+        .select("pdf_path")
+        .eq("id", book_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not book_res.data or not book_res.data[0].get("pdf_path"):
+        raise HTTPException(status_code=404, detail="PDF not found for this order.")
+
+    pdf_path = book_res.data[0]["pdf_path"]
+    file_data = supabase.storage.from_("book_files").download(pdf_path)
+    pdf_bytes = getattr(file_data, "content", file_data)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="SpeechToBook.pdf"'},
+    )
+
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
