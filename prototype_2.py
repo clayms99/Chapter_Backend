@@ -483,7 +483,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
         results[upload_id] = {"status": "done", "chapters": chapters_text, "is_preview": False}
 
         interior_pdf_path = make_interior_pdf(chapters_text, user_id)
-        cover_pdf_path = make_cover_pdf(title="Bookify Session", author=user_id)
+        cover_pdf_path = make_cover_pdf(title="Booksly Session", author=user_id)
 
         interior_storage_path = f"books/{user_id}/{upload_id}.pdf"
         cover_storage_path = f"books/{user_id}/{upload_id}_cover.pdf"
@@ -598,7 +598,7 @@ async def create_checkout_session(request: Request):
             "user_id": user_id,
             "upload_id": upload_id,
             "order_type": purchase_type,
-            "title": "Bookify Order",
+            "title": "Booksly Order",
         },
     )
     return {"url": session.url}
@@ -779,7 +779,8 @@ async def stripe_webhook(request: Request):
         user_id = meta.get("user_id")
         upload_id = meta.get("upload_id")
         order_type = meta.get("order_type") or "pdf"
-        title = meta.get("title") or "Bookify Order"
+        title = "Booksly Order"
+        # title = meta.get("title") or "Bookify Order"
 
         status_order = "Complete" if order_type == "pdf" else "Processing"
         order_insert = supabase.table("orders").insert({
