@@ -515,8 +515,15 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
 
         results[upload_id] = {"status": "done", "chapters": chapters_text, "is_preview": False}
 
+        # Use the custom title from the order if shipping was already submitted
+        cover_title = "Booksly Session"
+        if order_id:
+            title_row = supabase.table("orders").select("title, shipping_submitted").eq("id", order_id).single().execute()
+            if title_row.data and title_row.data.get("shipping_submitted") and title_row.data.get("title"):
+                cover_title = title_row.data["title"]
+
         interior_pdf_path = make_interior_pdf(chapters_text, user_id)
-        cover_pdf_path = make_cover_pdf(title="Booksly Session", author=user_id)
+        cover_pdf_path = make_cover_pdf(title=cover_title, author=user_id)
 
         interior_storage_path = f"books/{user_id}/{upload_id}.pdf"
         cover_storage_path = f"books/{user_id}/{upload_id}_cover.pdf"
@@ -528,7 +535,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
 
         book_insert = supabase.table("user_books").insert({
             "user_id": user_id,
-            "title": f"Session {upload_id[:8]}",
+            "title": cover_title if cover_title != "Booksly Session" else f"Session {upload_id[:8]}",
             "content": chapters_text,
             "pdf_path": interior_storage_path,
         }).execute()
@@ -682,7 +689,7 @@ async def submit_shipping(request: Request, user_id: str = Depends(verify_token)
         "shipping_submitted": True,
     }).eq("id", order_id).execute()
 
-    # If book already exists, update its title and print now
+    # If book already exists, update its title, regenerate cover, and print now
     order_data = order_res.data
     if order_data.get("type") == "book" and order_data.get("book_id"):
         supabase.table("user_books").update({
@@ -693,6 +700,22 @@ async def submit_shipping(request: Request, user_id: str = Depends(verify_token)
         if book_res.data and book_res.data.get("pdf_path"):
             interior_path = book_res.data["pdf_path"]
             cover_path = interior_path.replace(".pdf", "_cover.pdf")
+
+            # Regenerate the cover PDF with the user's custom title
+            new_cover_pdf = None
+            try:
+                new_cover_pdf = make_cover_pdf(title=custom_title, author=user_id)
+                with open(new_cover_pdf, "rb") as f:
+                    supabase.storage.from_("book_files").update(cover_path, f)
+            except Exception as e:
+                print(f"⚠️ Could not regenerate cover with custom title: {e}")
+            finally:
+                if new_cover_pdf and os.path.exists(new_cover_pdf):
+                    try:
+                        os.remove(new_cover_pdf)
+                    except Exception:
+                        pass
+
             try:
                 _ = supabase_public_url("book_files", cover_path)
                 threading.Thread(target=send_to_printer, args=(interior_path, cover_path, user_id, order_id), daemon=True).start()
