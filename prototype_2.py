@@ -608,10 +608,16 @@ async def create_checkout_session(request: Request):
 async def submit_shipping(request: Request, user_id: str = Depends(verify_token)):
     data = await request.json()
     order_id = data.get("order_id")
+    custom_title = data.get("custom_title")
     shipping = data.get("shipping", {})
 
     if not order_id:
         raise HTTPException(status_code=400, detail="Missing order_id")
+
+    if not custom_title or not custom_title.strip():
+        raise HTTPException(status_code=400, detail="Missing custom_title")
+
+    custom_title = custom_title.strip()
 
     required = ["name", "street1", "city", "state_code", "country_code", "postcode"]
     for field in required:
@@ -630,6 +636,7 @@ async def submit_shipping(request: Request, user_id: str = Depends(verify_token)
         raise HTTPException(status_code=404, detail="Order not found")
 
     supabase.table("orders").update({
+        "title": custom_title,
         "ship_name": shipping.get("name", ""),
         "ship_email": shipping.get("email", ""),
         "ship_phone": shipping.get("phone_number", ""),
@@ -642,9 +649,13 @@ async def submit_shipping(request: Request, user_id: str = Depends(verify_token)
         "shipping_submitted": True,
     }).eq("id", order_id).execute()
 
-    # If book already exists, print now
+    # If book already exists, update its title and print now
     order_data = order_res.data
     if order_data.get("type") == "book" and order_data.get("book_id"):
+        supabase.table("user_books").update({
+            "title": custom_title,
+        }).eq("id", order_data["book_id"]).execute()
+
         book_res = supabase.table("user_books").select("pdf_path").eq("id", order_data["book_id"]).single().execute()
         if book_res.data and book_res.data.get("pdf_path"):
             interior_path = book_res.data["pdf_path"]
