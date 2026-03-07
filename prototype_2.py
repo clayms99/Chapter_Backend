@@ -318,8 +318,8 @@ def make_cover_pdf(title: str, author: str) -> str:
     c.setFont(FONT_BOLD, 24)
     c.drawCentredString(front_center_x, front_center_y + 40, title[:60])
 
-    c.setFont(FONT_BODY, 14)
-    c.drawCentredString(front_center_x, front_center_y, f"by {author}"[:80])
+    # c.setFont(FONT_BODY, 14)
+    # c.drawCentredString(front_center_x, front_center_y, f"by {author}"[:80])
 
     c.save()
     return pdf_path
