@@ -13,6 +13,7 @@ import uuid
 import tempfile
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from textwrap import wrap
 from typing import Optional
 
@@ -80,6 +81,8 @@ DOMAIN = "https://www.booksly.co"
 
 # In-memory results cache (prototype)
 results: dict[str, dict] = {}
+
+MAX_TRANSCRIPTION_WORKERS = 8
 
 
 # -------------------------
@@ -186,13 +189,15 @@ def _run_ffmpeg(cmd: list[str]) -> None:
 
 
 def compress_to_mp3(input_path: str) -> str:
-    """Always re-encode to a clean MP3 Whisper can read."""
+    """Always re-encode to a clean MP3 Whisper can read.
+    Uses 16 kHz sample rate because Whisper resamples to 16 kHz internally,
+    so higher rates just waste encoding time and bandwidth."""
     output_path = tempfile.mktemp(suffix=".mp3")
     _run_ffmpeg([
         FFMPEG, "-y",
         "-i", input_path,
         "-ac", "1",
-        "-ar", "44100",
+        "-ar", "16000",
         "-b:a", "64k",
         output_path,
     ])
@@ -240,7 +245,7 @@ def chunk_audio_mp3(file_path: str, chunk_size_mb: int = 10) -> list[str]:
             "-i", file_path,
             "-t", str(part_dur),
             "-ac", "1",
-            "-ar", "44100",
+            "-ar", "16000",
             "-b:a", "64k",
             part_path,
         ])
@@ -441,12 +446,40 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
         chunks = chunk_audio_mp3(compressed_path)
 
         transcripts: list[str] = []
-        for path in chunks:
+
+        def _transcribe_chunk(idx_path: tuple[int, str]) -> tuple[int, str]:
+            """Transcribe a single chunk; returns (index, text) for ordering."""
+            idx, path = idx_path
             with open(path, "rb") as audio_file:
                 transcript = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
-            transcripts.append(transcript.text)
-            if path != compressed_path and os.path.exists(path):
-                os.remove(path)
+            return idx, transcript.text
+
+        # Transcribe chunks in parallel – each call is I/O-bound (network),
+        # so using threads gives a near-linear speedup.
+        with ThreadPoolExecutor(max_workers=min(len(chunks), MAX_TRANSCRIPTION_WORKERS)) as executor:
+            futures = {
+                executor.submit(_transcribe_chunk, (i, path)): (i, path)
+                for i, path in enumerate(chunks)
+            }
+            indexed_results: list[tuple[int, str]] = []
+            try:
+                for future in as_completed(futures):
+                    indexed_results.append(future.result())
+                    _, path = futures[future]
+                    if path != compressed_path and os.path.exists(path):
+                        os.remove(path)
+            finally:
+                # Clean up any remaining chunk files on success or failure
+                for _, path in futures.values():
+                    if path != compressed_path and os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+
+        # Reassemble transcripts in original chunk order
+        indexed_results.sort(key=lambda x: x[0])
+        transcripts = [text for _, text in indexed_results]
 
         full_text = "\n".join(transcripts)
 
@@ -470,7 +503,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
                 },
                 {"role": "user", "content": f"Divide this transcript into chapters:\n\n{full_text}"},
             ],
-            max_tokens=4000,
+            max_tokens=16384,
         )
         chapters_text = completion.choices[0].message.content.strip()
 
