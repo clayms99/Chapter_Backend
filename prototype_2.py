@@ -258,7 +258,7 @@ def chunk_audio_mp3(file_path: str, chunk_size_mb: int = 10) -> list[str]:
 # -------------------------
 # PDF generation (INTERIOR + COVER)
 # -------------------------
-def make_interior_pdf(chapter_text: str, user_name: str = "User") -> str:
+def make_interior_pdf(chapter_text: str, title: str = "User") -> str:
     """Interior PDF must match Lulu trim size; fonts must be embedded."""
     styles = getSampleStyleSheet()
     styles["Normal"].fontName = FONT_BODY
@@ -280,7 +280,7 @@ def make_interior_pdf(chapter_text: str, user_name: str = "User") -> str:
     )
 
     story = [
-        Paragraph(f"{user_name}'s Book", styles["Title"]),
+        Paragraph(title, styles["Title"]),
         Spacer(1, 0.2 * inch),
     ]
 
@@ -522,7 +522,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
             if title_row.data and title_row.data.get("shipping_submitted") and title_row.data.get("title"):
                 cover_title = title_row.data["title"]
 
-        interior_pdf_path = make_interior_pdf(chapters_text, user_id)
+        interior_pdf_path = make_interior_pdf(chapters_text, cover_title)
         cover_pdf_path = make_cover_pdf(title=cover_title, author=user_id)
 
         interior_storage_path = f"books/{user_id}/{upload_id}.pdf"
