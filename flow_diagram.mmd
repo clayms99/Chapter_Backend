@@ -45,10 +45,16 @@ graph TD
     AL["🔍 Query Endpoints"] -->|GET /result/upload_id| AM["Return Cached<br/>Result"]
     AL -->|GET /orders/user_id| AN["Get All Orders<br/>for User"]
     AL -->|GET /order-from-session| AO["Find Order by<br/>Stripe Session ID"]
+
+    AP["📥 Download Endpoints"] -->|GET /download-latest-pdf| AQ["Fetch Latest Book<br/>for User"]
+    AP -->|GET /download/order_id| AR["Fetch Book<br/>by Order ID"]
+    AQ --> AS["Stream PDF<br/>from Supabase"]
+    AR --> AS
     
     style A fill:#e1f5ff
     style S fill:#fff3e0
     style AA fill:#f3e5f5
     style AL fill:#e8f5e9
+    style AP fill:#fff9c4
     style K fill:#ffebee
     style AK fill:#c8e6c9
