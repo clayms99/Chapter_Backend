@@ -500,7 +500,9 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
                             "Clean up the following raw speech-to-text transcript: fix obvious typos, "
                             "add proper punctuation and paragraph breaks, but do NOT embellish, "
                             "summarize, or change any of the speaker's words. "
-                            "Preserve the original meaning and wording exactly."
+                            "Preserve the original meaning and wording exactly. "
+                            "At natural breaks, create a new chapter representing that section's content with a meaningful title. "
+                            "Chapters should be sufficiently long (at least a few paragraphs) and have clear titles, but do not split too frequently. "
                         ),
                     },
                     {"role": "user", "content": f"Format this transcript:\n\n{full_text}"},
