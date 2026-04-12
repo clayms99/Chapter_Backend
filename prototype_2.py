@@ -869,8 +869,12 @@ async def stripe_webhook(request: Request):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        stripe_session_id = session.get("id")
-        meta = session.get("metadata", {}) or {}
+        # Stripe SDK returns StripeObject; use attribute access, not .get()
+        stripe_session_id = session.id
+        meta = session.metadata or {}
+        # meta may be a StripeObject or dict — normalise to dict
+        if not isinstance(meta, dict):
+            meta = dict(meta)
         user_id = meta.get("user_id")
         upload_id = meta.get("upload_id")
         order_type = meta.get("order_type") or "pdf"
