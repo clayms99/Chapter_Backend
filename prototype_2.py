@@ -435,8 +435,8 @@ def send_to_printer(interior_storage_path: str, cover_storage_path: str, user_id
 # -------------------------
 # Background processing
 # -------------------------
-def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, order_id: Optional[str] = None):
-    print(f"▶️ process_audio START upload_id={upload_id}, has_paid={has_paid}, order_id={order_id}, temp_path={temp_path}")
+def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, order_id: Optional[str] = None, mode: str = "narrative"):
+    print(f"▶️ process_audio START upload_id={upload_id}, has_paid={has_paid}, order_id={order_id}, mode={mode}, temp_path={temp_path}")
 
     interior_pdf_path = None
     cover_pdf_path = None
@@ -488,24 +488,46 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
                 if p and os.path.exists(p):
                     os.remove(p)
 
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an experienced editor and storyteller who transforms a long-form spoken transcript "
-                        "into a structured book-style narrative divided into chapters. "
-                        "Each chapter should cover a substantial portion of the conversation. "
-                        "Use rich prose with smooth transitions. "
-                        "Each chapter must include a clear title and multiple detailed paragraphs."
-                    ),
-                },
-                {"role": "user", "content": f"Divide this transcript into chapters:\n\n{full_text}"},
-            ],
-            max_tokens=16384,
-        )
-        chapters_text = completion.choices[0].message.content.strip()
+        if mode == "transcription":
+            # Pure transcription — return the raw Whisper output with light cleanup
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a precise transcription formatter. "
+                            "Clean up the following raw speech-to-text transcript: fix obvious typos, "
+                            "add proper punctuation and paragraph breaks, but do NOT embellish, "
+                            "summarize, or change any of the speaker's words. "
+                            "Preserve the original meaning and wording exactly."
+                        ),
+                    },
+                    {"role": "user", "content": f"Format this transcript:\n\n{full_text}"},
+                ],
+                max_tokens=16384,
+            )
+            chapters_text = completion.choices[0].message.content.strip()
+        else:
+            # Narrative mode — transform into a structured book
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an experienced editor and storyteller who transforms a long-form spoken transcript "
+                            "into a structured book-style narrative divided into chapters. "
+                            "Each chapter should cover a substantial portion of the conversation. "
+                            "Use rich prose with smooth transitions. "
+                            "Each chapter must include a clear title and multiple detailed paragraphs."
+                        ),
+                    },
+                    {"role": "user", "content": f"Divide this transcript into chapters:\n\n{full_text}"},
+                ],
+                max_tokens=16384,
+            )
+            chapters_text = completion.choices[0].message.content.strip()
 
         if not has_paid:
             preview_lines = chapters_text.splitlines()[:20]
@@ -573,9 +595,12 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
 # Routes
 # -------------------------
 @app.post("/upload/")
-async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None)):
+async def upload_audio(file: UploadFile = File(...), authorization: str = Header(None), mode: str = "narrative"):
     user_id = verify_token(authorization)
     upload_id = str(uuid.uuid4())
+
+    if mode not in ("narrative", "transcription"):
+        mode = "narrative"
 
     suffix = ""
     if file.filename and "." in file.filename:
@@ -596,12 +621,13 @@ async def upload_audio(file: UploadFile = File(...), authorization: str = Header
         "user_id": user_id,
         "audio_path": storage_audio_path,
         "status": "preview",
+        "mode": mode,
     }).execute()
 
-    results[upload_id] = {"status": "processing", "paid": False}
+    results[upload_id] = {"status": "processing", "paid": False, "mode": mode}
 
-    threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id, False), daemon=True).start()
-    return {"id": upload_id, "status": "processing"}
+    threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id, False, None, mode), daemon=True).start()
+    return {"id": upload_id, "status": "processing", "mode": mode}
 
 
 @app.get("/result/{upload_id}")
@@ -859,8 +885,9 @@ async def stripe_webhook(request: Request):
         }).execute()
         order_id = order_insert.data[0]["id"] if order_insert.data else None
 
-        upload_row = supabase.table("upload_sessions").select("audio_path").eq("id", upload_id).single().execute()
+        upload_row = supabase.table("upload_sessions").select("audio_path, mode").eq("id", upload_id).single().execute()
         audio_path = upload_row.data["audio_path"] if upload_row.data else None
+        upload_mode = (upload_row.data.get("mode") or "narrative") if upload_row.data else "narrative"
         if not audio_path:
             return JSONResponse(status_code=200, content={"status": "missing audio_path"})
 
@@ -870,7 +897,7 @@ async def stripe_webhook(request: Request):
         with open(temp_path, "wb") as f:
             f.write(getattr(file_data, "content", file_data))
 
-        threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id, True, order_id), daemon=True).start()
+        threading.Thread(target=process_audio, args=(upload_id, temp_path, user_id, True, order_id, upload_mode), daemon=True).start()
         supabase.table("upload_sessions").update({"status": "processing"}).eq("id", upload_id).execute()
 
     return JSONResponse(status_code=200, content={"status": "success"})
