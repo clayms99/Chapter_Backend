@@ -501,8 +501,9 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
                             "add proper punctuation and paragraph breaks, but do NOT embellish, "
                             "summarize, or change any of the speaker's words. "
                             "Preserve the original meaning and wording exactly. "
-                            "At natural breaks, create a new chapter representing that section's content with a meaningful title. "
-                            "Chapters should be sufficiently long (at least a few paragraphs) and have clear titles, but do not split too frequently. "
+                            "At natural breaks, create a new chapter representing that section's content. "
+                            "Chapter designations should just be numbers, with no chapter title, and no symbols (include #)."
+                            "Chapters should be sufficiently long (at least a few paragraphs), but do not split too frequently. "
                         ),
                     },
                     {"role": "user", "content": f"Format this transcript:\n\n{full_text}"},
@@ -523,6 +524,7 @@ def process_audio(upload_id: str, temp_path: str, user_id: str, has_paid: bool, 
                             "Each chapter should cover a substantial portion of the conversation. "
                             "Use rich prose with smooth transitions. "
                             "Each chapter must include a clear title and multiple detailed paragraphs."
+                            "Chapter designators should be a number followed by the chapter title, with no symbols (including #)."
                         ),
                     },
                     {"role": "user", "content": f"Divide this transcript into chapters:\n\n{full_text}"},
